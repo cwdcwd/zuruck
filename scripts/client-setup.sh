@@ -99,8 +99,9 @@ if ! command -v restic &>/dev/null; then
   fi
 fi
 
+RESTIC_BIN=$(command -v restic)
 RESTIC_VERSION=$(restic version 2>&1 | head -1)
-info "Using restic: ${RESTIC_VERSION}"
+info "Using restic: ${RESTIC_VERSION} (${RESTIC_BIN})"
 
 # ── Create configuration directory ──────────────────────────────────────
 info "Creating /etc/restic directory..."
@@ -127,13 +128,16 @@ chown root:root /etc/restic/env
 info "Environment file saved to /etc/restic/env"
 
 # ── Test connectivity ──────────────────────────────────────────────────
+# The IAM policy gates s3:ListBucket on a prefix matching the client's own
+# folder, so list with that prefix — listing the bucket root will always be
+# AccessDenied for a healthy install.
 info "Testing S3 connectivity..."
 source /etc/restic/env
-if aws s3 ls "s3://${BUCKET_NAME}/" --region "${REGION}" &>/dev/null; then
+if aws s3 ls "s3://${BUCKET_NAME}/${CLIENT_NAME}/" --region "${REGION}" &>/dev/null; then
   info "S3 connectivity OK"
 else
   warn "S3 connectivity test failed. Check credentials and bucket name."
-  warn "You can test manually: source /etc/restic/env && aws s3 ls s3://${BUCKET_NAME}/"
+  warn "Manual test: source /etc/restic/env && aws s3 ls s3://${BUCKET_NAME}/${CLIENT_NAME}/"
 fi
 
 # ── Initialize repository (if not already initialized) ──────────────────
@@ -162,7 +166,13 @@ fi
 
 # ── Create systemd timer ────────────────────────────────────────────────
 if [[ "$(uname)" == "Linux" ]] && command -v systemctl &>/dev/null; then
-  BACKUP_PATHS_STR="${BACKUP_PATHS[*]:-/data}"
+  if [[ ${#BACKUP_PATHS[@]} -eq 0 ]]; then
+    BACKUP_PATHS=("/data")
+  fi
+
+  # Build a properly-quoted argv string for ExecStart= (paths can contain
+  # spaces). systemd parses ExecStart with shell-like quoting rules.
+  printf -v BACKUP_PATHS_QUOTED ' "%s"' "${BACKUP_PATHS[@]}"
 
   info "Creating systemd service and timer..."
   cat > /etc/systemd/system/restic-backup.service <<EOF
@@ -173,8 +183,8 @@ After=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/restic/env
-ExecStartPre=/usr/local/bin/restic backup ${BACKUP_PATHS_STR} --tag auto
-ExecStart=/usr/local/bin/restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-yearly 2 --prune
+ExecStartPre=${RESTIC_BIN} backup${BACKUP_PATHS_QUOTED} --tag auto
+ExecStart=${RESTIC_BIN} forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-yearly 2 --prune
 EOF
 
   cat > /etc/systemd/system/restic-backup.timer <<EOF

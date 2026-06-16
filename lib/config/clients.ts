@@ -12,9 +12,9 @@
 export interface ClientConfig {
   /**
    * Unique identifier for the client. Used as:
-   *  - S3 prefix: s3://bucket/{prefix}/
-   *  - IAM user name: restic-{prefix}
-   *  - SSM parameter: /zuruck/restic/{prefix}/master-password
+   *  - S3 prefix: s3://bucket/{name}/
+   *  - IAM user name: restic-{name}
+   *  - SSM parameter: /zuruck/restic/{name}/master-password
    */
   readonly name: string;
 
@@ -37,6 +37,18 @@ export interface ClientConfig {
 export const DEFAULT_FRESHNESS_THRESHOLD_HOURS = 24;
 
 /**
+ * Canonical S3 prefix for a client. Defined once so IAM, monitoring, secrets,
+ * docs, and tests can never drift.
+ */
+export const clientPrefix = (name: string): string => `${name}/`;
+
+/**
+ * Canonical SSM parameter name for a client's master restic password.
+ */
+export const clientMasterPasswordParameterName = (name: string): string =>
+  `/zuruck/restic/${name}/master-password`;
+
+/**
  * All backup clients. Add new clients here and redeploy.
  */
 export const CLIENTS: ClientConfig[] = [
@@ -50,10 +62,4 @@ export const CLIENTS: ClientConfig[] = [
     description: 'Bravo staging server',
     freshnessThresholdHours: 48,
   },
-  // Add more clients as needed:
-  // {
-  //   name: 'charlie',
-  //   description: 'Charlie database server',
-  //   freshnessThresholdHours: 12,
-  // },
 ];

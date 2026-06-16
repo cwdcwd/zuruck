@@ -7,6 +7,7 @@ This guide walks you through setting up a client machine to back up to the Zuruc
 - A client entry has been added to `lib/config/clients.ts` and deployed via CDK
 - You have received from your AWS administrator:
   - AWS Access Key ID and Secret Access Key for the client's IAM user
+    (retrieved from Secrets Manager — see runbook)
   - The S3 bucket name
   - The AWS region (default: `us-west-2`)
   - The master password from SSM (for initial repo initialization only)
@@ -72,24 +73,34 @@ sudo chown root:root /etc/restic/env
 
 ## Step 4: Initialize the Repository
 
-The administrator should initialize the repository using the **master password** (from SSM), then add the client key:
+This step is split between admin and client. Admin uses the master password
+once to bootstrap the repo and add a client-specific key; the client then
+operates only with its own password. The master password should never be
+stored on the client machine.
+
+### Step 4a — Admin (one-time, on a trusted workstation)
 
 ```bash
-# Administrator: Initialize with master password
-source /etc/restic/env
+# Set repo + master password env (do NOT use the client's env file)
+export AWS_ACCESS_KEY_ID="<admin-credentials-or-temporary-keys>"
+export AWS_SECRET_ACCESS_KEY="<...>"
+export RESTIC_REPOSITORY="s3:s3.us-west-2.amazonaws.com/<bucket-name>/<client-name>"
 export RESTIC_PASSWORD="<master-password-from-ssm>"
+
+# Initialize the repository
 restic init
 
-# Administrator: Add the client key
+# Add the client key (will prompt for the *new* client password)
 restic key add
-# Enter the master password when prompted
-# Then enter the client password (from /etc/restic/password) when prompted
 
-# Administrator: Verify both keys exist
+# Verify both keys exist
 restic key list
 ```
 
-> **Note**: The `restic init` and `restic key add` commands should be run by the administrator, not on the client machine. The client only needs the client password in `/etc/restic/password`.
+### Step 4b — Client (on the target machine)
+
+The client only needs `/etc/restic/password` populated (Step 2) and
+`/etc/restic/env` configured (Step 3). No additional restic admin work.
 
 ## Step 5: Test the Backup
 

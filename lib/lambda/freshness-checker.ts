@@ -1,6 +1,6 @@
 import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
-import { CloudWatchClient, PutMetricDataCommand } from '@aws-sdk/client-cloudwatch';
+import { CloudWatchClient, PutMetricDataCommand, MetricDatum } from '@aws-sdk/client-cloudwatch';
 
 interface ClientConfig {
   name: string;
@@ -14,25 +14,20 @@ const cw = new CloudWatchClient({});
 
 export const handler = async (): Promise<void> => {
   const bucketName = process.env.BUCKET_NAME!;
-  const region = process.env.REGION!;
+  const namespace = process.env.METRIC_NAMESPACE ?? 'Zuruck/Backup';
   const clients: ClientConfig[] = JSON.parse(process.env.CLIENTS!);
-  const namespace = 'Zuruck/Backup';
   const now = Date.now();
 
-  const metricData: Array<{
-    MetricName: string;
-    Dimensions: Array<{ Name: string; Value: string }>;
-    Value: number;
-    Unit: string;
-  }> = [];
+  const metricData: MetricDatum[] = [];
+  const stamp = new Date();
+  const dimsFor = (clientName: string) => [{ Name: 'Client', Value: clientName }];
 
   for (const client of clients) {
     console.log(`Checking freshness for client: ${client.name}`);
 
-    // Check S3 last modified time under the client's prefix
+    // ── List objects under the client prefix ──────────────────────────
     let latestTimestamp = 0;
     let objectCount = 0;
-
     try {
       let continuationToken: string | undefined;
       do {
@@ -42,53 +37,79 @@ export const handler = async (): Promise<void> => {
           ContinuationToken: continuationToken,
         }));
 
-        if (response.Contents) {
-          for (const obj of response.Contents) {
-            if (obj.LastModified) {
-              const ts = obj.LastModified.getTime();
-              if (ts > latestTimestamp) {
-                latestTimestamp = ts;
-              }
-            }
-            objectCount++;
+        for (const obj of response.Contents ?? []) {
+          if (obj.LastModified) {
+            const ts = obj.LastModified.getTime();
+            if (ts > latestTimestamp) latestTimestamp = ts;
           }
+          objectCount++;
         }
 
         continuationToken = response.NextContinuationToken;
       } while (continuationToken);
     } catch (err) {
       console.error(`Error listing objects for ${client.name}:`, err);
+      // Keep going to publish a 0 freshness signal — that pages the operator
+      // via the Lambda-error alarm, not via stale data.
+      throw err;
     }
 
-    // Calculate freshness: hours since last backup
-    const hoursSinceLastBackup = latestTimestamp > 0
-      ? (now - latestTimestamp) / (1000 * 60 * 60)
-      : 9999; // No objects found = very stale
-
-    const isFresh = hoursSinceLastBackup <= client.thresholdHours ? 1 : 0;
-
+    const backupsExist = objectCount > 0;
     metricData.push({
-      MetricName: 'BackupFreshness',
-      Dimensions: [{ Name: 'Client', Value: client.name }],
-      Value: isFresh,
+      MetricName: 'BackupsExist',
+      Dimensions: dimsFor(client.name),
+      Value: backupsExist ? 1 : 0,
       Unit: 'None',
-    });
-
-    metricData.push({
-      MetricName: 'HoursSinceLastBackup',
-      Dimensions: [{ Name: 'Client', Value: client.name }],
-      Value: Math.round(hoursSinceLastBackup * 100) / 100,
-      Unit: 'None',
+      Timestamp: stamp,
     });
 
     metricData.push({
       MetricName: 'ObjectCount',
-      Dimensions: [{ Name: 'Client', Value: client.name }],
+      Dimensions: dimsFor(client.name),
       Value: objectCount,
-      Unit: 'None',
+      Unit: 'Count',
+      Timestamp: stamp,
     });
 
-    // Verify SSM parameter is accessible
+    if (backupsExist) {
+      const hoursSinceLastBackup = (now - latestTimestamp) / (1000 * 60 * 60);
+      const isFresh = hoursSinceLastBackup <= client.thresholdHours ? 1 : 0;
+
+      metricData.push({
+        MetricName: 'BackupFreshness',
+        Dimensions: dimsFor(client.name),
+        Value: isFresh,
+        Unit: 'None',
+        Timestamp: stamp,
+      });
+      metricData.push({
+        MetricName: 'HoursSinceLastBackup',
+        Dimensions: dimsFor(client.name),
+        Value: Math.round(hoursSinceLastBackup * 100) / 100,
+        Unit: 'None',
+        Timestamp: stamp,
+      });
+
+      console.log(
+        `Client ${client.name}: hoursSinceLastBackup=${hoursSinceLastBackup.toFixed(2)}, ` +
+          `isFresh=${isFresh}, objectCount=${objectCount}`,
+      );
+    } else {
+      // No objects yet for this client (newly onboarded, or wiped). Publish
+      // BackupFreshness=0 so the alarm trips, but skip HoursSinceLastBackup
+      // — a sentinel like 9999 would skew anomaly detection.
+      metricData.push({
+        MetricName: 'BackupFreshness',
+        Dimensions: dimsFor(client.name),
+        Value: 0,
+        Unit: 'None',
+        Timestamp: stamp,
+      });
+
+      console.log(`Client ${client.name}: no backups found yet (objectCount=0)`);
+    }
+
+    // ── Verify SSM master-password parameter is decryptable ───────────
     try {
       await ssm.send(new GetParameterCommand({
         Name: `/zuruck/restic/${client.name}/master-password`,
@@ -96,39 +117,28 @@ export const handler = async (): Promise<void> => {
       }));
       metricData.push({
         MetricName: 'SSMParameterAccessible',
-        Dimensions: [{ Name: 'Client', Value: client.name }],
+        Dimensions: dimsFor(client.name),
         Value: 1,
         Unit: 'None',
+        Timestamp: stamp,
       });
     } catch (err) {
       console.error(`SSM parameter check failed for ${client.name}:`, err);
       metricData.push({
         MetricName: 'SSMParameterAccessible',
-        Dimensions: [{ Name: 'Client', Value: client.name }],
+        Dimensions: dimsFor(client.name),
         Value: 0,
         Unit: 'None',
+        Timestamp: stamp,
       });
     }
-
-    console.log(
-      `Client ${client.name}: hoursSinceLastBackup=${hoursSinceLastBackup.toFixed(2)}, ` +
-      `isFresh=${isFresh}, objectCount=${objectCount}`
-    );
   }
 
-  // Publish all metrics to CloudWatch
-  // CloudWatch limits: 20 metrics per PutMetricData call
+  // CloudWatch limits: 20 metrics per PutMetricData call.
   for (let i = 0; i < metricData.length; i += 20) {
-    const batch = metricData.slice(i, i + 20);
     await cw.send(new PutMetricDataCommand({
       Namespace: namespace,
-      MetricData: batch.map(m => ({
-        MetricName: m.MetricName,
-        Dimensions: m.Dimensions,
-        Value: m.Value,
-        Unit: m.Unit as string,
-        Timestamp: new Date(),
-      })),
+      MetricData: metricData.slice(i, i + 20),
     }));
   }
 

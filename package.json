@@ -5,11 +5,13 @@
     "build": "tsc",
     "watch": "tsc -w",
     "test": "jest",
+    "synth": "cdk synth",
+    "diff": "cdk diff",
     "cdk": "cdk"
   },
   "devDependencies": {
     "@types/jest": "^30",
-    "@types/node": "^24.10.1",
+    "@types/node": "^20",
     "aws-cdk": "2.1127.0",
     "jest": "^30",
     "ts-jest": "^29",
@@ -20,7 +22,7 @@
     "@aws-sdk/client-cloudwatch": "^3.1069.0",
     "@aws-sdk/client-s3": "^3.1069.0",
     "@aws-sdk/client-ssm": "^3.1069.0",
-    "aws-cdk-lib": "^2.259.0",
+    "aws-cdk-lib": "2.259.0",
     "constructs": "^10.5.0"
   }
 }

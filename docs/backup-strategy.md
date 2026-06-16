@@ -64,7 +64,7 @@ Before restoring from Glacier or Deep Archive, you must first restore the object
 # Initiate a restore request (takes 3-5 hours for Flexible, 12-48h for Deep Archive)
 aws s3api restore-object \
   --bucket zuruck-backup-<account-id>-<region> \
-  --key "client-alpha/data/..." \
+  --key "alpha/data/..." \
   --restore-request '{"Days":7,"GlacierJobParameters":{"Tier":"Standard"}}'
 ```
 
@@ -74,7 +74,7 @@ Or use the bulk restore script:
 # Restore all objects under a client prefix
 for key in $(aws s3api list-objects-v2 \
   --bucket zuruck-backup-<account-id>-<region> \
-  --prefix "client-alpha/" \
+  --prefix "alpha/" \
   --query 'Contents[].Key' \
   --output text); do
   aws s3api restore-object \

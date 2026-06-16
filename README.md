@@ -14,17 +14,17 @@ graph TB
         end
 
         subgraph Storage["S3 Bucket: zuruck-backup"]
-            PA["client-a/"]
-            PB["client-b/"]
-            PN["client-n/"]
+            PA["alpha/"]
+            PB["bravo/"]
+            PN["charlie/"]
         end
 
         KMS["KMS CMK<br/>(auto-rotation)"]
 
         subgraph Secrets["SSM Parameter Store"]
-            SA["/zuruck/restic/client-a/<br/>master-password"]
-            SB["/zuruck/restic/client-b/<br/>master-password"]
-            SN["/zuruck/restic/client-n/<br/>master-password"]
+            SA["/zuruck/restic/alpha/<br/>master-password"]
+            SB["/zuruck/restic/bravo/<br/>master-password"]
+            SN["/zuruck/restic/charlie/<br/>master-password"]
         end
 
         subgraph Monitoring["Monitoring Stack"]
@@ -36,9 +36,9 @@ graph TB
         end
     end
 
-    CA -->|S3 scoped to client-a/*| PA
-    CB -->|S3 scoped to client-b/*| PB
-    CN -->|S3 scoped to client-n/*| PN
+    CA -->|S3 scoped to alpha/*| PA
+    CB -->|S3 scoped to bravo/*| PB
+    CN -->|S3 scoped to charlie/*| PN
     CA -->|ssm:GetParameter| SA
     CB -->|ssm:GetParameter| SB
     CN -->|ssm:GetParameter| SN
@@ -90,7 +90,13 @@ npx cdk deploy
 
 2. Redeploy: `npx cdk deploy`
 
-3. Retrieve access keys from CloudFormation outputs
+3. Retrieve the client's access key:
+
+```bash
+# AccessKeyId is in the secret's description; SecretAccessKey is the secret value.
+aws secretsmanager describe-secret --secret-id zuruck/clients/charlie/access-key
+aws secretsmanager get-secret-value --secret-id zuruck/clients/charlie/access-key --query SecretString --output text
+```
 
 4. Run the client setup script on the target machine:
 

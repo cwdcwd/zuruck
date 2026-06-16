@@ -18,17 +18,14 @@ export class ZuruckStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props?: ZuruckStackProps) {
     super(scope, id, props);
 
-    // ── KMS Key + IAM Group ──────────────────────────────────────────
     const kms = new BackupKms(this, 'Kms', {
       description: 'Restic S3 backup encryption key',
     });
 
-    // ── S3 Bucket ─────────────────────────────────────────────────────
     const bucket = new BackupBucket(this, 'Bucket', {
       encryptionKey: kms.key,
     });
 
-    // ── IAM Users + Policies ──────────────────────────────────────────
     const iam = new BackupIam(this, 'Iam', {
       bucket: bucket.bucket,
       encryptionKey: kms.key,
@@ -36,13 +33,11 @@ export class ZuruckStack extends cdk.Stack {
       clients: CLIENTS,
     });
 
-    // ── SSM Parameter Store (Master Passwords) ────────────────────────
-    const secrets = new BackupSecrets(this, 'Secrets', {
+    new BackupSecrets(this, 'Secrets', {
       encryptionKey: kms.key,
       clients: CLIENTS,
     });
 
-    // ── Monitoring ─────────────────────────────────────────────────────
     const monitoring = new BackupMonitoring(this, 'Monitoring', {
       bucket: bucket.bucket,
       encryptionKey: kms.key,
@@ -50,7 +45,6 @@ export class ZuruckStack extends cdk.Stack {
       alertEmails: props?.alertEmails,
     });
 
-    // ── Outputs ────────────────────────────────────────────────────────
     new cdk.CfnOutput(this, 'BucketName', {
       value: bucket.bucket.bucketName,
       description: 'S3 bucket for restic backups',
@@ -66,16 +60,16 @@ export class ZuruckStack extends cdk.Stack {
       description: 'SNS topic ARN for backup alerts',
     });
 
-    // Output access keys for each client (marked as sensitive)
+    // Per-client: emit only the AccessKeyId (non-sensitive) and the
+    // Secrets-Manager ARN of the secret access key. Operators retrieve the
+    // secret value via `aws secretsmanager get-secret-value`, which has its
+    // own ACL surface and audit trail.
     for (const [name, resources] of iam.clientResources) {
       new cdk.CfnOutput(this, `AccessKeyId-${name}`, {
-        value: resources.accessKey.accessKeyId,
-        description: `Access key ID for client '${name}'`,
-      });
-
-      new cdk.CfnOutput(this, `SecretAccessKey-${name}`, {
-        value: resources.accessKey.secretAccessKey.unsafeUnwrap(),
-        description: `Secret access key for client '${name}' (SENSITIVE)`,
+        value: resources.credentialsSecret.secretArn,
+        description:
+          `Secrets Manager ARN holding the secret access key for client '${name}'. ` +
+          `The AccessKeyId is in the secret's Description.`,
       });
     }
   }

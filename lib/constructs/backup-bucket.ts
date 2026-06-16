@@ -26,6 +26,15 @@ export interface BackupBucketProps {
    * @default 7
    */
   readonly abortIncompleteUploadsDays?: number;
+
+  /**
+   * The number of days to retain noncurrent object versions before expiry.
+   * The bucket is versioned and clients have `s3:DeleteObjectVersion`, so
+   * versioning is the only soft-delete recovery available; setting this too
+   * low collapses that protection.
+   * @default 30
+   */
+  readonly noncurrentVersionRetentionDays?: number;
 }
 
 export class BackupBucket extends Construct {
@@ -40,6 +49,7 @@ export class BackupBucket extends Construct {
     const glacierDays = props.glacierTransitionDays ?? 90;
     const deepArchiveDays = props.deepArchiveTransitionDays ?? 365;
     const abortDays = props.abortIncompleteUploadsDays ?? 7;
+    const noncurrentDays = props.noncurrentVersionRetentionDays ?? 30;
 
     this.bucket = new s3.Bucket(this, 'Bucket', {
       bucketName: `zuruck-backup-${cdk.Aws.ACCOUNT_ID}-${cdk.Aws.REGION}`,
@@ -67,10 +77,13 @@ export class BackupBucket extends Construct {
             },
           ],
         },
-        // Clean up deleted markers and incomplete uploads
+        // Clean up deleted markers and incomplete uploads. Noncurrent versions
+        // are the only soft-delete recovery against a compromised client
+        // credential, so we retain them long enough for an operator to notice
+        // (`zuruck-stale-backup-*` paging on a sudden mass delete) and act.
         {
           expiredObjectDeleteMarker: true,
-          noncurrentVersionExpiration: cdk.Duration.days(1),
+          noncurrentVersionExpiration: cdk.Duration.days(noncurrentDays),
           abortIncompleteMultipartUploadAfter: cdk.Duration.days(abortDays),
         },
       ],

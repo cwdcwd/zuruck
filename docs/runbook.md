@@ -22,13 +22,21 @@ This runbook covers common operational procedures for the Zuruck restic S3 backu
 npx cdk deploy
 ```
 
-3. Retrieve the new client's access keys from CloudFormation outputs:
+3. Retrieve the new client's access key from Secrets Manager. The
+   `AccessKeyId` is in the secret's description; the `SecretAccessKey` is
+   the secret's value. We never put the secret access key into a CFN
+   output — outputs end up in any caller of `cloudformation:DescribeStacks`.
 
 ```bash
-aws cloudformation describe-stacks \
-  --stack-name ZuruckStack \
-  --query 'Stacks[0].Outputs' \
-  --output table
+# AccessKeyId — embedded in the description (not sensitive on its own)
+aws secretsmanager describe-secret \
+  --secret-id zuruck/clients/charlie/access-key \
+  --query Description --output text
+
+# SecretAccessKey — the secret value
+aws secretsmanager get-secret-value \
+  --secret-id zuruck/clients/charlie/access-key \
+  --query SecretString --output text
 ```
 
 4. Retrieve the master password from SSM:
@@ -50,14 +58,18 @@ aws ssm get-parameter \
 
 1. Remove the entry from `lib/config/clients.ts`
 2. Deploy: `npx cdk deploy`
-3. **Important**: The IAM user and access keys are deleted, but S3 data is preserved
+3. **Important**: The IAM user, the access-key Secrets Manager secret, and
+   the freshness alarm are deleted. The S3 data and the SSM master-password
+   parameter are **retained** by design — losing the master password
+   strands every archived backup.
 4. Optionally delete the client's S3 prefix:
 
 ```bash
 aws s3 rm s3://zuruck-backup-<account-id>-<region>/charlie/ --recursive
 ```
 
-5. Delete the SSM parameter:
+5. Optionally delete the SSM master-password parameter — only after you have
+   confirmed there is nothing recoverable from the prefix above:
 
 ```bash
 aws ssm delete-parameter --name "/zuruck/restic/charlie/master-password"
@@ -77,7 +89,7 @@ aws ssm delete-parameter --name "/zuruck/restic/charlie/master-password"
 # Bulk restore all objects under a prefix
 for key in $(aws s3api list-objects-v2 \
   --bucket zuruck-backup-<account-id>-<region> \
-  --prefix "client-alpha/" \
+  --prefix "alpha/" \
   --query 'Contents[].Key' \
   --output text); do
   aws s3api restore-object \
@@ -103,7 +115,9 @@ restic snapshots
 # Browse a specific snapshot
 restic ls <snapshot-id>
 
-# Restore specific paths
+# Restore specific paths.
+# `--include` is restic ≥ 0.16; on older versions use `--include-pattern`
+# or pass the path directly (no flag) to restrict the restore.
 restic restore <snapshot-id> --target /data --include /path/to/file
 ```
 
@@ -127,7 +141,8 @@ restic restore <snapshot-id> --target /data --include /path/to/file
 
 ### Bucket Size Anomaly
 
-**Trigger**: Total bucket size exceeds 100 GB
+**Trigger**: Total bucket size (Standard + Glacier + Deep Archive, summed via
+CloudWatch math) exceeds 100 GB
 
 **Response**:
 1. Check which client is consuming the most space:
@@ -136,7 +151,7 @@ restic restore <snapshot-id> --target /data --include /path/to/file
 aws s3api list-objects-v2 \
   --bucket zuruck-backup-<account-id>-<region> \
   --query 'Contents[].Size' \
-  --prefix "client-alpha/" \
+  --prefix "alpha/" \
   --output text | awk '{sum+=$1} END {print sum/1024/1024/1024 " GB"}'
 ```
 
