@@ -47,10 +47,14 @@ sudo mv restic /usr/local/bin/
 Generate a strong client-specific password. This is **different** from the master password.
 
 ```bash
+# Create the restic config directory
+sudo mkdir -p /etc/restic
+
 # Generate a random password
 openssl rand -base64 32 | sudo tee /etc/restic/password
 sudo chmod 600 /etc/restic/password
-sudo chown root:root /etc/restic/password
+# Linux uses root:root, macOS uses root:wheel
+sudo chown root:root /etc/restic/password 2>/dev/null || sudo chown root:wheel /etc/restic/password
 ```
 
 ## Step 3: Configure Environment
@@ -58,7 +62,6 @@ sudo chown root:root /etc/restic/password
 Create the environment file:
 
 ```bash
-sudo mkdir -p /etc/restic
 sudo tee /etc/restic/env <<EOF
 export AWS_ACCESS_KEY_ID="<your-access-key-id>"
 export AWS_SECRET_ACCESS_KEY="<your-secret-access-key>"
@@ -66,7 +69,7 @@ export RESTIC_REPOSITORY="s3:s3.us-west-2.amazonaws.com/<bucket-name>/<client-pr
 export RESTIC_PASSWORD_FILE="/etc/restic/password"
 EOF
 sudo chmod 600 /etc/restic/env
-sudo chown root:root /etc/restic/env
+sudo chown root:root /etc/restic/env 2>/dev/null || sudo chown root:wheel /etc/restic/env
 ```
 
 > **Important**: Replace `<your-access-key-id>`, `<your-secret-access-key>`, `<bucket-name>`, and `<client-prefix>` with the values from your administrator.
