@@ -31,8 +31,10 @@ export interface BackupBucketProps {
    * The number of days to retain noncurrent object versions before expiry.
    * The bucket is versioned and clients have `s3:DeleteObjectVersion`, so
    * versioning is the only soft-delete recovery available; setting this too
-   * low collapses that protection.
-   * @default 30
+   * low collapses that protection. 90 days matches the Glacier transition
+   * window, giving operators a full quarter to detect and recover from an
+   * accidental or malicious mass-delete.
+   * @default 90
    */
   readonly noncurrentVersionRetentionDays?: number;
 }
@@ -49,7 +51,10 @@ export class BackupBucket extends Construct {
     const glacierDays = props.glacierTransitionDays ?? 90;
     const deepArchiveDays = props.deepArchiveTransitionDays ?? 365;
     const abortDays = props.abortIncompleteUploadsDays ?? 7;
-    const noncurrentDays = props.noncurrentVersionRetentionDays ?? 30;
+    // Noncurrent version retention — 90 days matches the Glacier transition
+    // window, giving operators a full quarter to detect and recover from an
+    // accidental or malicious mass-delete. (PR review finding #3: was 30 days)
+    const noncurrentDays = props.noncurrentVersionRetentionDays ?? 90;
 
     this.bucket = new s3.Bucket(this, 'Bucket', {
       bucketName: `zuruck-backup-${cdk.Aws.ACCOUNT_ID}-${cdk.Aws.REGION}`,

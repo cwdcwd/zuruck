@@ -38,7 +38,11 @@ Required:
   --client-name NAME         Client name (e.g., alpha, bravo)
   --bucket BUCKET            S3 bucket name (from CDK output)
   --access-key-id KEY        AWS Access Key ID for the client IAM user
-  --secret-access-key KEY    AWS Secret Access Key for the client IAM user
+
+Secret access key (provide via ONE of these — never as a CLI arg):
+  --secret-access-key KEY    AWS Secret Access Key (use only in CI; visible in ps)
+  SECRET_ACCESS_KEY env var  Preferred: export SECRET_ACCESS_KEY=... before running
+  Interactive prompt          If neither flag nor env var is set, you'll be prompted
 
 Optional:
   --region REGION            AWS region (default: us-west-2)
@@ -47,10 +51,10 @@ Optional:
   -h, --help                 Show this help message
 
 Example:
-  $0 --client-name alpha \\
-     --bucket zuruck-backup-123456789012-us-west-2 \\
-     --access-key-id AKIAIOSFODNN7EXAMPLE \\
-     --secret-access-key wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY \\
+  export SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
+  $0 --client-name alpha \
+     --bucket zuruck-backup-123456789012-us-west-2 \
+     --access-key-id AKIAIOSFODNN7EXAMPLE \
      --region us-west-2 \\
      --backup-path /data \\
      --install-restic
@@ -77,7 +81,21 @@ done
 [[ -z "$CLIENT_NAME" ]] && error "Missing required argument: --client-name"
 [[ -z "$BUCKET_NAME" ]] && error "Missing required argument: --bucket"
 [[ -z "$ACCESS_KEY_ID" ]] && error "Missing required argument: --access-key-id"
-[[ -z "$SECRET_ACCESS_KEY" ]] && error "Missing required argument: --secret-access-key"
+
+# Resolve secret access key: prefer env var > CLI arg > interactive prompt.
+# SECURITY: --secret-access-key on the command line is visible in ps(1) and
+# shell history. Prefer `export SECRET_ACCESS_KEY=...` before running this
+# script, or omit it entirely to be prompted securely.
+if [[ -z "$SECRET_ACCESS_KEY" ]]; then
+  if [[ -n "${SECRET_ACCESS_KEY_ENV:-}" ]]; then
+    SECRET_ACCESS_KEY="$SECRET_ACCESS_KEY_ENV"
+  else
+    warn "--secret-access-key not provided and SECRET_ACCESS_KEY env var not set."
+    warn "You will be prompted for the secret access key (input hidden)."
+    read -rs SECRET_ACCESS_KEY </dev/tty
+    [[ -z "$SECRET_ACCESS_KEY" ]] && error "Secret access key is required."
+  fi
+fi
 
 info "Setting up restic backup client: ${CLIENT_NAME}"
 
@@ -131,18 +149,24 @@ info "Environment file saved to /etc/restic/env"
 # The IAM policy gates s3:ListBucket on a prefix matching the client's own
 # folder, so list with that prefix — listing the bucket root will always be
 # AccessDenied for a healthy install.
-info "Testing S3 connectivity..."
-source /etc/restic/env
-if aws s3 ls "s3://${BUCKET_NAME}/${CLIENT_NAME}/" --region "${REGION}" &>/dev/null; then
-  info "S3 connectivity OK"
+if command -v aws &>/dev/null; then
+  info "Testing S3 connectivity (aws CLI found)..."
+  source /etc/restic/env
+  if aws s3 ls "s3://${BUCKET_NAME}/${CLIENT_NAME}/" --region "${REGION}" &>/dev/null; then
+    info "S3 connectivity OK"
+  else
+    warn "S3 connectivity test failed. Check credentials and bucket name."
+    warn "Manual test: source /etc/restic/env && aws s3 ls s3://${BUCKET_NAME}/${CLIENT_NAME}/"
+  fi
 else
-  warn "S3 connectivity test failed. Check credentials and bucket name."
-  warn "Manual test: source /etc/restic/env && aws s3 ls s3://${BUCKET_NAME}/${CLIENT_NAME}/"
+  warn "aws CLI not found — skipping S3 connectivity test."
+  warn "Restic does not require the AWS CLI, but the test does."
+  warn "Install the AWS CLI or test manually: source /etc/restic/env && restic snapshots"
 fi
 
 # ── Initialize repository (if not already initialized) ──────────────────
 info "Checking if restic repository exists..."
-if source /etc/restic/env && restic snapshots &>/dev/null; then
+if source /etc/restic/env && restic snapshots 2>/dev/null; then
   info "Restic repository already initialized"
 else
   warn "Restic repository not yet initialized."

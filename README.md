@@ -27,6 +27,12 @@ graph TB
             SN["/zuruck/restic/charlie/<br/>master-password"]
         end
 
+        subgraph AccessKeys["Secrets Manager"]
+            AK1["zuruck/clients/alpha/<br/>access-key"]
+            AK2["zuruck/clients/bravo/<br/>access-key"]
+            AKN["zuruck/clients/charlie/<br/>access-key"]
+        end
+
         subgraph Monitoring["Monitoring Stack"]
             EB["EventBridge<br/>(1h schedule)"]
             Lambda["Lambda<br/>Freshness Checker"]
@@ -44,6 +50,7 @@ graph TB
     CN -->|ssm:GetParameter| SN
     KMS -.->|SSE-KMS| Storage
     KMS -.->|SecureString| Secrets
+    KMS -.->|Encrypt| AccessKeys
     EB --> Lambda
     Lambda --> CW
     CW --> SNS
@@ -101,14 +108,18 @@ aws secretsmanager get-secret-value --secret-id zuruck/clients/charlie/access-ke
 4. Run the client setup script on the target machine:
 
 ```bash
+# Preferred: pass the secret via env var (not visible in ps(1) or shell history)
+export SECRET_ACCESS_KEY=<secret-access-key>
 sudo ./scripts/client-setup.sh \
   --client-name charlie \
   --bucket zuruck-backup-<account-id>-<region> \
   --access-key-id AKIA... \
-  --secret-access-key abc123... \
   --region us-west-2 \
   --install-restic
 ```
+
+> The script also accepts `--secret-access-key` for CI, or will prompt
+> interactively if neither flag nor env var is set.
 
 5. Initialize the restic repository using the master password from SSM
 
@@ -124,7 +135,7 @@ zuruck/
 │   │   ├── backup-bucket.ts         # S3 bucket + lifecycle + encryption
 │   │   ├── backup-iam.ts            # IAM users, group, policies per client
 │   │   ├── backup-kms.ts            # KMS key for SSE
-│   │   ├── backup-secrets.ts        # SSM Parameter Store (SecureString)
+│   │   ├── backup-secrets.ts        # Custom Resource Lambda for SSM master passwords
 │   │   └── backup-monitoring.ts     # Lambda, CloudWatch, SNS, dashboard
 │   └── lambda/
 │       ├── freshness-checker.ts          # Hourly per-client backup freshness check
@@ -152,7 +163,7 @@ zuruck/
 | **Client access keys** | Secrets Manager (`zuruck/clients/{client}/access-key`) — never in CloudFormation outputs |
 | **Restic keys** | Dual: client password local to each machine, master password in SSM for DR |
 | **Monitoring** | Hourly Lambda freshness checker; alarms for stale backups, Lambda errors, and bucket-size growth across all storage classes |
-| **Dashboard** | Per-client freshness, SSM accessibility, and bucket size by storage class |
+| **Dashboard** | Per-client freshness, SSM accessibility, Lambda errors, and bucket size by storage class |
 
 ## Useful Commands
 

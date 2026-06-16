@@ -172,6 +172,26 @@ aws kms describe-key --key-id <kms-key-id>
 2. Verify the Lambda execution role has `ssm:GetParameter` and `kms:Decrypt` permissions
 3. Check CloudWatch Logs for the Lambda function for detailed error messages
 
+### Freshness Checker Lambda Errors
+
+**Trigger**: `zuruck-freshness-checker-errors` alarm — Lambda invocation errors ≥ 1 in any 1-hour window
+
+This alarm distinguishes "stale backup data" from "the monitoring system itself is broken."
+
+**Response**:
+1. Check CloudWatch Logs for the Lambda function (`/aws/lambda/zuruck-freshness-checker`):
+   ```bash
+   aws logs tail /aws/lambda/zuruck-freshness-checker --since 1h
+   ```
+2. Common causes:
+   - Lambda timeout (the checker has a 30-second margin guard — check if the
+     client list or S3 object count has grown beyond what a single invocation
+     can process)
+   - SDK throttling (the checker retries up to 3 times with standard backoff)
+   - Permission changes to the Lambda execution role
+3. If the error is transient, the next scheduled run (1 hour) should self-heal
+4. If persistent, check the Lambda configuration and redeploy if necessary
+
 ## Key Rotation
 
 ### Rotate IAM Access Keys

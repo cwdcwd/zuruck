@@ -70,6 +70,12 @@ sudo chown root:root /etc/restic/env
 ```
 
 > **Important**: Replace `<your-access-key-id>`, `<your-secret-access-key>`, `<bucket-name>`, and `<client-prefix>` with the values from your administrator.
+>
+> **Security tip**: The automated `scripts/client-setup.sh` script accepts the
+> secret access key via the `SECRET_ACCESS_KEY` environment variable (preferred)
+> or an interactive prompt, avoiding exposure in `ps(1)` and shell history.
+> The `--secret-access-key` CLI flag is also supported for CI but is not
+> recommended for interactive use.
 
 ## Step 4: Initialize the Repository
 

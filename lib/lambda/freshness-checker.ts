@@ -1,6 +1,7 @@
 import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { CloudWatchClient, PutMetricDataCommand, MetricDatum } from '@aws-sdk/client-cloudwatch';
+import { standardRetryStrategy } from '@aws-sdk/middleware-retry';
 
 interface ClientConfig {
   name: string;
@@ -8,21 +9,43 @@ interface ClientConfig {
   thresholdHours: number;
 }
 
-const s3 = new S3Client({});
-const ssm = new SSMClient({});
-const cw = new CloudWatchClient({});
+// Use the standard retry strategy with backoff for S3 throttling protection.
+// The SDK v3 default is 3 retries; we keep that but make it explicit.
+const retryStrategy = standardRetryStrategy({ maxAttempts: 3 });
+
+const s3 = new S3Client({ retryStrategy });
+const ssm = new SSMClient({ retryStrategy });
+const cw = new CloudWatchClient({ retryStrategy });
+
+// Timeout guard: Lambda has a 5-minute hard limit. We bail out 30 seconds
+// early so we can still flush whatever metrics we've collected so far.
+const TIMEOUT_MARGIN_MS = 30_000;
+const LAMBDA_TIMEOUT_MS = 5 * 60 * 1000;
 
 export const handler = async (): Promise<void> => {
   const bucketName = process.env.BUCKET_NAME!;
   const namespace = process.env.METRIC_NAMESPACE ?? 'Zuruck/Backup';
   const clients: ClientConfig[] = JSON.parse(process.env.CLIENTS!);
   const now = Date.now();
+  const deadline = now + LAMBDA_TIMEOUT_MS - TIMEOUT_MARGIN_MS;
 
   const metricData: MetricDatum[] = [];
   const stamp = new Date();
   const dimsFor = (clientName: string) => [{ Name: 'Client', Value: clientName }];
 
   for (const client of clients) {
+    // Timeout guard: if we're approaching the Lambda deadline, stop iterating
+    // and flush whatever metrics we have. This prevents a total metric blackout
+    // when one client has millions of objects and paginating takes too long.
+    if (Date.now() > deadline) {
+      console.warn(
+        `Approaching Lambda timeout — skipping remaining clients after ${client.name}. ` +
+          `Partial metrics will be published. Consider increasing Lambda timeout or ` +
+          `reducing the number of objects per prefix.`,
+      );
+      break;
+    }
+
     console.log(`Checking freshness for client: ${client.name}`);
 
     // ── List objects under the client prefix ──────────────────────────
@@ -31,6 +54,14 @@ export const handler = async (): Promise<void> => {
     try {
       let continuationToken: string | undefined;
       do {
+        // Inner timeout guard: check before each pagination call.
+        if (Date.now() > deadline) {
+          console.warn(
+            `Timeout during pagination for ${client.name} — publishing partial objectCount=${objectCount}`,
+          );
+          break;
+        }
+
         const response = await s3.send(new ListObjectsV2Command({
           Bucket: bucketName,
           Prefix: client.prefix,

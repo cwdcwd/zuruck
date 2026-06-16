@@ -82,6 +82,7 @@ export class BackupMonitoring extends Construct {
 
     this.freshnessChecker = new lambdaNodejs.NodejsFunction(this, 'FreshnessChecker', {
       runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
       handler: 'handler',
       entry: `${__dirname}/../lambda/freshness-checker.ts`,
       timeout: cdk.Duration.minutes(5),
@@ -261,6 +262,16 @@ export class BackupMonitoring extends Construct {
       }),
       ...freshnessWidgets,
       ssmWidget,
+      new cloudwatch.GraphWidget({
+        title: 'Freshness Checker Lambda Errors',
+        left: [this.freshnessChecker.metricErrors({
+          period: cdk.Duration.hours(1),
+          statistic: 'Sum',
+          label: 'Errors',
+        })],
+        width: 24,
+        height: 6,
+      }),
       new cloudwatch.GraphWidget({
         title: 'Bucket Size by Storage Class',
         left: [standardSize, glacierSize, deepArchiveSize],

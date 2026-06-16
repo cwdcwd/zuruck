@@ -11,12 +11,12 @@
 | Network | Public internet | Simplest, no VPC endpoint costs |
 | Monitoring | Full CloudWatch alerting | Lambda freshness checker + SNS + dashboard |
 | Region | us-west-2 | Requested |
-| Secrets | SSM Parameter Store (SecureString) | Cheaper than Secrets Manager for static passwords |
-| Key strategy | Dual restic keys (client + master) | Client never has master password; master key in SSM for DR |
+| Secrets | SSM Parameter Store (SecureString) via Custom Resource | Passwords generated server-side in Lambda, never in CFN template |
+| Access keys | Secrets Manager (per-client secret) | Secret access key stored in Secrets Manager, not CFN outputs |
 
 ## Architecture Overview
 
-Single S3 bucket with per-client path prefixes (e.g., `client-alpha/`, `client-bravo/`). Each client gets its own IAM user scoped to its prefix. Lifecycle rules transition objects to Glacier Flexible Retrieval after 90 days, then Glacier Deep Archive after 365 days. CloudWatch monitors backup freshness and bucket health.
+Single S3 bucket with per-client path prefixes (e.g., `alpha/`, `bravo/`). Each client gets its own IAM user scoped to its prefix. Lifecycle rules transition objects to Glacier Flexible Retrieval after 90 days, then Glacier Deep Archive after 365 days. CloudWatch monitors backup freshness and bucket health. Access keys are stored in Secrets Manager (not CFN outputs). Master restic passwords are provisioned via a Custom Resource Lambda that generates random passwords server-side.
 
 ```mermaid
 graph TB
@@ -28,17 +28,22 @@ graph TB
         end
 
         subgraph Storage["S3 Bucket: zuruck-backup"]
-            PA["client-a/"]
-            PB["client-b/"]
+            PA["alpha/"]
+            PB["bravo/"]
             PN["client-n/"]
         end
 
         KMS["KMS CMK<br/>(auto-rotation)"]
 
         subgraph Secrets["SSM Parameter Store"]
-            SA["/zuruck/restic/client-a/<br/>master-password"]
-            SB["/zuruck/restic/client-b/<br/>master-password"]
+            SA["/zuruck/restic/alpha/<br/>master-password"]
+            SB["/zuruck/restic/bravo/<br/>master-password"]
             SN["/zuruck/restic/client-n/<br/>master-password"]
+        end
+
+        subgraph AccessKeys["Secrets Manager"]
+            AK1["zuruck/clients/alpha/<br/>access-key"]
+            AK2["zuruck/clients/bravo/<br/>access-key"]
         end
 
         subgraph Monitoring["Monitoring Stack"]
@@ -50,16 +55,17 @@ graph TB
         end
     end
 
-    CA -->|S3 read/write/list/delete<br/>scoped to client-a/*| PA
-    CB -->|S3 read/write/list/delete<br/>scoped to client-b/*| PB
+    CA -->|S3 read/write/list/delete<br/>scoped to alpha/*| PA
+    CB -->|S3 read/write/list/delete<br/>scoped to bravo/*| PB
     CN -->|S3 read/write/list/delete<br/>scoped to client-n/*| PN
 
-    CA -->|ssm:GetParameter<br/>scoped to client-a/*| SA
-    CB -->|ssm:GetParameter<br/>scoped to client-b/*| SB
+    CA -->|ssm:GetParameter<br/>scoped to alpha/*| SA
+    CB -->|ssm:GetParameter<br/>scoped to bravo/*| SB
     CN -->|ssm:GetParameter<br/>scoped to client-n/*| SN
 
     KMS -.->|SSE-KMS encryption| Storage
     KMS -.->|SecureString decryption| Secrets
+    KMS -.->|Secret encryption| AccessKeys
 
     EB --> Lambda
     Lambda --> CW
@@ -156,25 +162,36 @@ sequenceDiagram
 ### SSM Parameter Store
 - Per-client SecureString parameter: `/zuruck/restic/{client-name}/master-password`
 - Encrypted with the backup KMS key
-- Stores the master/admin restic key for each client repo
+- **Provisioned via Custom Resource Lambda** (master-password-provisioner) — passwords are generated server-side using `crypto.randomBytes`, never present in the CloudFormation template
+- Idempotent: existing parameters are not overwritten on redeploy, so operator-driven rotations survive
+- Removal policy: RETAIN — losing the master password orphans all archived backups
+
+### Secrets Manager
+- Per-client secret: `zuruck/clients/{client-name}/access-key`
+- Stores the IAM secret access key (the AccessKeyId is in the secret's Description field)
+- Encrypted with the backup KMS key
+- Operators retrieve via `aws secretsmanager get-secret-value` — never via CFN outputs
 
 ### CloudWatch + SNS
-- SNS topic "backup-alerts" for all notifications
+- SNS topic "backup-alerts" for all notifications (encrypted with KMS)
 - CloudWatch Alarms:
-  - No backup activity per client in 24h (custom metric from Lambda)
-  - Bucket total size > threshold (anomaly detection or static)
+  - Per-client stale backup alarm (BackupFreshness < 1, missing data = breaching)
+  - Lambda error alarm (freshness checker itself is failing)
+  - Bucket total size > threshold (sums StandardStorage + GlacierStorage + DeepArchiveStorage)
 - Lambda function (triggered by EventBridge scheduled rule every 1h):
   - Lists objects per client prefix, checks last modified time
-  - Publishes custom CloudWatch metric `BackupFreshness` per client
+  - Publishes custom CloudWatch metrics per client: BackupFreshness, HoursSinceLastBackup, BackupsExist, ObjectCount, SSMParameterAccessible
   - Verifies SSM parameters exist and are decryptable
-- Dashboard: backup health overview
+  - Timeout guard: bails early and flushes partial metrics if approaching Lambda timeout
+  - Retry strategy: standard SDK v3 retry with backoff for S3 throttling
+- Dashboard: backup health overview (freshness, SSM accessibility, Lambda errors, bucket size by storage class)
 
 ### EventBridge
 - Scheduled rule (1h rate) → Lambda for freshness check
 
 ## Secrets Architecture
 
-### Approach: SSM Parameter Store (SecureString) + Dual Restic Keys
+### Approach: SSM Parameter Store (SecureString) + Dual Restic Keys + Secrets Manager for Access Keys
 
 Each client repo has **two restic keys**:
 1. **Client key** — used by the client machine for daily `restic backup` / `restic forget` operations. Stored locally on the client (e.g., `/etc/restic/password`) for zero-latency access during backups.
@@ -182,18 +199,28 @@ Each client repo has **two restic keys**:
 
 ### SSM Parameter Layout
 - `/zuruck/restic/{client-name}/master-password` — SecureString, encrypted with the backup KMS key
-- Each client's IAM policy includes `ssm:GetParameter` scoped to their parameter path
+- Provisioned via Custom Resource Lambda (master-password-provisioner) — generated server-side, never in template
+- Idempotent: existing parameters are not overwritten on redeploy
+- Removal policy: RETAIN
+
+### Secrets Manager Layout
+- `zuruck/clients/{client-name}/access-key` — stores the IAM secret access key
+- AccessKeyId is stored in the secret's Description field (non-sensitive)
+- Encrypted with the backup KMS key
 
 ### CDK Resources Added
-- SSM Parameters (SecureString) for each client's master key
+- Custom Resource (Lambda-backed) for each client's SSM master password parameter
+- Secrets Manager secret for each client's IAM access key
 - IAM policy additions: `ssm:GetParameter` on `/zuruck/restic/{client}/*` for each client IAM user
 - KMS key policy: grant `ssm:GetParameter` decrypt to client IAM group
 - Lambda monitoring: verify SSM parameters exist and are decryptable
+- Lambda error alarm: catches freshness checker failures
+- Bucket size alarm: sums across all storage classes (Standard + Glacier + Deep Archive)
 
 ### Client Setup Flow
 1. Admin creates client via CDK (adds entry to `clients.ts`, deploys)
-2. Admin retrieves IAM access keys for the new client user
-3. Admin retrieves master password from SSM (or generates and stores it)
+2. Admin retrieves IAM access key secret from Secrets Manager: `aws secretsmanager get-secret-value --secret-id zuruck/clients/{name}/access-key`
+3. Admin retrieves master password from SSM (auto-generated by Custom Resource Lambda): `aws ssm get-parameter --name /zuruck/restic/{name}/master-password --with-decryption`
 4. Admin runs `restic init` with the master password
 5. Admin runs `restic key add` to add a second client-specific password
 6. Admin distributes client password to the client machine
@@ -202,15 +229,18 @@ Each client repo has **two restic keys**:
 
 ### Why This Approach
 - **SSM Parameter Store** is cheaper than Secrets Manager ($0.05/advanced param vs $0.40/secret) and sufficient for static passwords that don't need rotation
+- **Custom Resource Lambda** generates passwords server-side — they never appear in the CloudFormation template or git history, and existing parameters are not overwritten on redeploy
 - **Dual keys** means the client machine never has the master password — if compromised, admin can `restic key remove` the client key and issue a new one without touching the master key
 - **Master key in SSM** ensures disaster recovery: even if the client machine is destroyed, the master key is recoverable from AWS
+- **Secrets Manager for access keys** avoids leaking the secret access key via `cloudformation:DescribeStacks` or CI logs
+- **Removal policy RETAIN** on SSM parameters prevents accidental data loss from `cdk destroy`
 
 ## CDK Project Structure
 
 ```
 zuruck/
 ├── bin/
-│   └── zuruck.ts                    # CDK app entry point
+│   └── zuruck.ts                    # CDK app entry point (region pinning, email validation)
 ├── lib/
 │   ├── zuruck-stack.ts              # Main stack (orchestrates constructs)
 │   ├── constructs/
@@ -218,7 +248,10 @@ zuruck/
 │   │   ├── backup-iam.ts            # IAM users, group, policies per client
 │   │   ├── backup-monitoring.ts     # Lambda, CloudWatch, SNS, dashboard
 │   │   ├── backup-kms.ts            # KMS key for SSE
-│   │   └── backup-secrets.ts        # SSM Parameter Store (SecureString) per client
+│   │   └── backup-secrets.ts        # Custom Resource Lambda for SSM master passwords
+│   ├── lambda/
+│   │   ├── freshness-checker.ts     # Lambda: backup freshness monitoring
+│   │   └── master-password-provisioner.ts # Lambda: SSM password provisioning
 │   └── config/
 │       └── clients.ts               # Client definitions (name, prefix)
 ├── scripts/
@@ -235,7 +268,7 @@ zuruck/
 ├── package.json
 ├── tsconfig.json
 ├── .gitignore
-├── .npmrc
+├── .npmrc                           # save-exact=true for infra deps
 └── README.md
 ```
 
@@ -250,14 +283,16 @@ zuruck/
 4. Create `lib/constructs/backup-kms.ts` — KMS key with rotation + key policy
 5. Create `lib/constructs/backup-bucket.ts` — S3 bucket with versioning, SSE-KMS, lifecycle rules, public access block
 6. Create `lib/constructs/backup-iam.ts` — IAM group, per-client users, scoped policies (S3 prefix + SSM parameter + KMS grant)
-7. Create `lib/constructs/backup-secrets.ts` — SSM Parameter Store SecureString per client for master restic passwords, encrypted with backup KMS key
+7. Create `lib/constructs/backup-secrets.ts` — Custom Resource Lambda for SSM master password provisioning (server-side generation, idempotent, RETAIN on deletion)
+8. Create `lib/lambda/master-password-provisioner.ts` — Lambda handler for SSM password provisioning
+9. Create `lib/lambda/freshness-checker.ts` — Lambda handler for backup freshness monitoring (timeout guard, retry strategy)
 
 ### Phase 3: Monitoring (depends on Phase 2)
-8. Create `lib/constructs/backup-monitoring.ts` — Lambda freshness checker (also verifies SSM parameters are decryptable), CloudWatch metrics/alarms, SNS topic, dashboard
+8. Create `lib/constructs/backup-monitoring.ts` — Lambda freshness checker (also verifies SSM parameters are decryptable), CloudWatch metrics/alarms (per-client freshness, Lambda errors, bucket size across all storage classes), SNS topic, dashboard (freshness + SSM + Lambda errors + bucket size)
 9. Wire EventBridge scheduled rule to Lambda
 
 ### Phase 4: Stack Assembly (depends on Phases 2–3)
-10. Create `lib/zuruck-stack.ts` — compose all constructs, pass cross-construct references (KMS key → bucket, IAM → KMS, bucket → monitoring, secrets → monitoring)
+10. Create `lib/zuruck-stack.ts` — compose all constructs, pass cross-construct references (KMS key → bucket, IAM → KMS, bucket → monitoring, secrets → monitoring). Per-client Secrets Manager secrets for access keys (not CFN outputs).
 
 ### Phase 5: Documentation & Client Tooling (parallel with Phase 4)
 11. Create `docs/backup-strategy.md` — GFS retention, lifecycle tiers, restic forget schedule
@@ -269,8 +304,13 @@ zuruck/
 ### Phase 6: Verification
 16. `cdk synth` — verify CloudFormation template generates correctly
 17. `cdk diff` — review changes before deploy
-18. Unit test for IAM policy scoping (client A cannot access client B prefix)
+18. Unit test for IAM policy scoping (client A cannot access client B prefix — negative assertion)
 19. Unit test for lifecycle rule correctness
+20. Unit test for SSM parameter name pattern
+21. Unit test for Lambda environment variables
+22. Unit test for stale-backup alarm triggerability (threshold + comparison operator)
+23. Unit test for no CHANGE-ME- in synthesized template
+24. Unit test for no access keys in CFN outputs
 
 ## Relevant Files (to create)
 - `bin/zuruck.ts` — CDK app entry
@@ -278,7 +318,9 @@ zuruck/
 - `lib/constructs/backup-kms.ts` — KMS construct
 - `lib/constructs/backup-bucket.ts` — S3 + lifecycle construct
 - `lib/constructs/backup-iam.ts` — IAM construct
-- `lib/constructs/backup-secrets.ts` — SSM Parameter Store construct
+- `lib/constructs/backup-secrets.ts` — Custom Resource Lambda for SSM master passwords
+- `lib/lambda/freshness-checker.ts` — Lambda: backup freshness monitoring
+- `lib/lambda/master-password-provisioner.ts` — Lambda: SSM password provisioning
 - `lib/constructs/backup-monitoring.ts` — monitoring construct
 - `lib/config/clients.ts` — client config
 - `scripts/client-setup.sh` — onboarding script
@@ -289,7 +331,7 @@ zuruck/
 
 ## Verification
 1. `cdk synth` produces valid CloudFormation
-2. Unit tests pass: IAM policy scoping, lifecycle rule assertions
+2. Unit tests pass: IAM policy scoping, lifecycle rule assertions, SSM parameter name pattern, Lambda env vars, alarm triggerability, no secrets in outputs
 3. `cdk diff` shows expected resources
 4. Manual: deploy to dev account, create test client, run `restic init` + `restic backup` + `restic forget`
 5. Verify CloudWatch metrics appear after Lambda runs

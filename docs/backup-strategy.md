@@ -50,6 +50,13 @@ Glacier Deep Archive (365+ days)
 | Glacier Flexible Retrieval | 3-5 hours | ~$0.004 | Warm backups (90-364 days) |
 | Glacier Deep Archive | 12-48 hours | ~$0.00099 | Compliance/archive (365+ days) |
 
+### Additional Lifecycle Rules
+
+| Rule | Default | Description |
+|---|---|---|
+| **Noncurrent version expiration** | 90 days | Deletes previous object versions 90 days after they become non-current. Protects against accidental `forget` data loss for ~3 months while limiting storage cost from version proliferation. |
+| **Abort incomplete multipart uploads** | 7 days | Cleans up multipart uploads that were never completed (e.g., from a crashed restic process), preventing orphaned storage charges. |
+
 ### Important Notes on Glacier
 
 - **Retrieval costs**: Restoring from Glacier incurs retrieval fees. Only restore when needed.
@@ -159,6 +166,7 @@ All metrics are in the `Zuruck/Backup` namespace, dimensioned by `Client`.
 The `zuruck-backup-health` CloudWatch dashboard shows:
 - Per-client `BackupFreshness` and `HoursSinceLastBackup` graphs
 - Per-client `SSMParameterAccessible` status
+- Freshness checker Lambda errors
 - Bucket size by storage class (Standard / Glacier / Deep Archive)
 
 ## Key Rotation

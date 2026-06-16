@@ -23,7 +23,7 @@ describe('ZuruckStack', () => {
     const cleanupRule = bucket.Properties.LifecycleConfiguration.Rules.find(
       (r) => (r as { NoncurrentVersionExpiration?: { NoncurrentDays: number } }).NoncurrentVersionExpiration,
     ) as { NoncurrentVersionExpiration: { NoncurrentDays: number } };
-    expect(cleanupRule.NoncurrentVersionExpiration.NoncurrentDays).toBeGreaterThanOrEqual(14);
+    expect(cleanupRule.NoncurrentVersionExpiration.NoncurrentDays).toBeGreaterThanOrEqual(90);
   });
 
   test('KMS key has rotation enabled', () => {
@@ -78,7 +78,7 @@ describe('ZuruckStack', () => {
             Action: 's3:ListBucket',
             Condition: {
               StringLike: {
-                's3:prefix': [prefix, `${prefix}*`],
+                's3:prefix': [`${prefix}*`],
               },
             },
           }),
@@ -181,6 +181,53 @@ describe('ZuruckStack', () => {
       template.hasResourceProperties('AWS::SecretsManager::Secret', {
         Name: `zuruck/clients/${client.name}/access-key`,
       });
+    }
+  });
+
+  test('SSM parameter names follow the expected pattern', () => {
+    const template = synth();
+    const customResources = template.findResources('Custom::ZuruckMasterPassword');
+    for (const [, resource] of Object.entries(customResources)) {
+      const props = (resource as { Properties: { ParameterName: string; ClientName: string } }).Properties;
+      expect(props.ParameterName).toMatch(/^\/zuruck\/restic\/[^/]+\/master-password$/);
+      expect(props.ParameterName).toContain(props.ClientName);
+    }
+  });
+
+  test('freshness checker Lambda has correct environment variables', () => {
+    synth().hasResourceProperties('AWS::Lambda::Function', {
+      Environment: {
+        Variables: Match.objectLike({
+          BUCKET_NAME: Match.anyValue(),
+          CLIENTS: Match.anyValue(),
+          REGION: Match.anyValue(),
+          METRIC_NAMESPACE: Match.anyValue(),
+        }),
+      },
+    });
+  });
+
+  test('no client S3 policy grants access to another client prefix', () => {
+    const template = synth();
+    const policies = template.findResources('AWS::IAM::Policy', {
+      Properties: { PolicyName: Match.stringLikeRegexp('^restic-s3-') },
+    });
+    for (const [, resource] of Object.entries(policies)) {
+      const props = (resource as { Properties: { PolicyName: string; PolicyDocument: { Statement: Array<{ Action: string | string[]; Resource: unknown }> } } }).Properties;
+      // Extract the client name from the policy name
+      const clientName = props.PolicyName.replace('restic-s3-', '');
+      for (const stmt of props.PolicyDocument.Statement) {
+        // Object-level actions must only reference the client's own prefix
+        if (Array.isArray(stmt.Action) && stmt.Action.includes('s3:GetObject')) {
+          const resourceJson = JSON.stringify(stmt.Resource);
+          // Ensure no other client prefix appears in the resource ARN
+          for (const otherClient of CLIENTS) {
+            if (otherClient.name === clientName) continue;
+            const otherPrefix = clientPrefix(otherClient.name);
+            expect(resourceJson).not.toContain(`/${otherPrefix}`);
+          }
+        }
+      }
     }
   });
 });

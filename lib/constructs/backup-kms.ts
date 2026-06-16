@@ -33,6 +33,12 @@ export class BackupKms extends Construct {
     // Note: IAM Groups cannot be used as principals in resource-based policies,
     // so we use the account root as principal and rely on identity-based
     // policies (attached to the group) for granting access.
+    //
+    // The account root principal in the key policy is standard practice but
+    // effectively grants kms:* to any principal in the account that can assume
+    // a role. For tighter control, replace AccountRootPrincipal with specific
+    // admin role ARNs. The current policy is acceptable for single-account
+    // deployments where the backup operator is the account admin.
     this.key = new kms.Key(this, 'Key', {
       description: props?.description ?? 'Restic S3 backup encryption key',
       enableKeyRotation: true,
@@ -40,7 +46,10 @@ export class BackupKms extends Construct {
       keySpec: kms.KeySpec.SYMMETRIC_DEFAULT,
       policy: new iam.PolicyDocument({
         statements: [
-          // Allow the account root to administer the key
+          // Allow the account root to administer the key.
+          // SECURITY: This grants kms:* to any principal in the account that
+          // has identity-based KMS permissions. For multi-team accounts,
+          // replace AccountRootPrincipal with specific admin role ARNs.
           new iam.PolicyStatement({
             effect: iam.Effect.ALLOW,
             principals: [new iam.AccountRootPrincipal()],

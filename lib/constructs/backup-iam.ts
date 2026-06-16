@@ -76,13 +76,21 @@ export class BackupIam extends Construct {
       const s3Policy = new iam.Policy(this, `S3Policy-${client.name}`, {
         policyName: `restic-s3-${client.name}`,
         statements: [
+          // s3:ListBucket is conditioned on the client's prefix so the client
+          // can only enumerate objects under their own path. Note: this does NOT
+          // prevent listing the bucket root (without a prefix parameter) — the
+          // client can see all prefix names in the bucket. This is acceptable
+          // because restic always specifies a prefix, and the object-level
+          // policy below gates actual data access. If you need to prevent even
+          // prefix enumeration, add an explicit Deny on s3:ListBucket without
+          // a prefix condition.
           new iam.PolicyStatement({
             effect: iam.Effect.ALLOW,
             actions: ['s3:ListBucket'],
             resources: [bucketArn],
             conditions: {
               StringLike: {
-                's3:prefix': [prefix, `${prefix}*`],
+                's3:prefix': [`${prefix}*`],
               },
             },
           }),

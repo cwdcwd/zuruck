@@ -52,6 +52,7 @@ export class BackupSecrets extends Construct {
 
     const onEventHandler = new lambdaNodejs.NodejsFunction(this, 'PasswordProvisionerFn', {
       runtime: lambda.Runtime.NODEJS_20_X,
+      architecture: lambda.Architecture.ARM_64,
       handler: 'handler',
       entry: `${__dirname}/../lambda/master-password-provisioner.ts`,
       timeout: cdk.Duration.minutes(2),
@@ -84,6 +85,10 @@ export class BackupSecrets extends Construct {
       onEventHandler,
     });
 
+    // Note: There is no explicit DependsOn between these SSM parameters and
+    // the IAM policies that grant ssm:GetParameter on them. In practice this
+    // is safe because clients won't be configured until after deployment, but
+    // CloudFormation may create the IAM policy before the parameter exists.
     for (const client of props.clients) {
       const parameterName = clientMasterPasswordParameterName(client.name);
 
