@@ -127,7 +127,8 @@ zuruck/
 │   │   ├── backup-secrets.ts        # SSM Parameter Store (SecureString)
 │   │   └── backup-monitoring.ts     # Lambda, CloudWatch, SNS, dashboard
 │   └── lambda/
-│       └── freshness-checker.ts     # Lambda handler for backup monitoring
+│       ├── freshness-checker.ts          # Hourly per-client backup freshness check
+│       └── master-password-provisioner.ts # Custom-resource handler that idempotently provisions SSM master passwords at deploy time
 ├── scripts/
 │   └── client-setup.sh              # Client onboarding script
 ├── docs/
@@ -147,9 +148,11 @@ zuruck/
 | **Isolation** | Per-client IAM users with prefix-scoped S3 policies |
 | **Cold Storage** | S3 Standard → Glacier Flexible Retrieval (90d) → Deep Archive (365d) |
 | **Retention** | GFS: 7 daily / 4 weekly / 6 monthly / 2 yearly |
-| **Secrets** | SSM Parameter Store (SecureString) with dual restic keys |
-| **Monitoring** | Lambda freshness checker, CloudWatch alarms, SNS alerts |
-| **Dashboard** | CloudWatch dashboard with per-client backup health |
+| **Master passwords** | SSM Parameter Store (SecureString), generated server-side at deploy time and `RETAIN`ed across `cdk destroy` |
+| **Client access keys** | Secrets Manager (`zuruck/clients/{client}/access-key`) — never in CloudFormation outputs |
+| **Restic keys** | Dual: client password local to each machine, master password in SSM for DR |
+| **Monitoring** | Hourly Lambda freshness checker; alarms for stale backups, Lambda errors, and bucket-size growth across all storage classes |
+| **Dashboard** | Per-client freshness, SSM accessibility, and bucket size by storage class |
 
 ## Useful Commands
 

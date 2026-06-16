@@ -115,7 +115,11 @@ restic stats
 
 ### Option A: Systemd Timer (Recommended for Linux)
 
-Create the backup service:
+`scripts/client-setup.sh` writes these unit files for you using the absolute
+path from `command -v restic`. If you're authoring them by hand, substitute
+the right path below — `/usr/bin/restic` on Debian/Ubuntu (apt), or
+`/usr/local/bin/restic` for a manual download. systemd does not expand
+shell substitutions in unit files.
 
 ```ini
 # /etc/systemd/system/restic-backup.service
@@ -126,8 +130,8 @@ After=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/restic/env
-ExecStartPre=/usr/local/bin/restic backup /data --tag auto
-ExecStart=/usr/local/bin/restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-yearly 2 --prune
+ExecStartPre=/usr/bin/restic backup /data --tag auto
+ExecStart=/usr/bin/restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-yearly 2 --prune
 ```
 
 Create the timer:

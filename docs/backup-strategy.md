@@ -97,6 +97,10 @@ done
 
 ### Systemd Timer Example
 
+Replace `RESTIC_BIN` below with the absolute path from `command -v restic`
+(usually `/usr/bin/restic` on Debian/Ubuntu, `/usr/local/bin/restic` for
+manual installs). systemd does not expand shell substitutions in unit files.
+
 ```ini
 # /etc/systemd/system/restic-backup.service
 [Unit]
@@ -106,8 +110,8 @@ After=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=/etc/restic/env
-ExecStart=/usr/local/bin/restic backup /data --tag auto
-ExecStart=/usr/local/bin/restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-yearly 2 --prune
+ExecStart=RESTIC_BIN backup /data --tag auto
+ExecStart=RESTIC_BIN forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-yearly 2 --prune
 
 # /etc/systemd/system/restic-backup.timer
 [Unit]
@@ -132,26 +136,30 @@ sudo systemctl enable --now restic-backup.timer
 
 ### CloudWatch Metrics
 
-| Metric | Namespace | Description |
-|---|---|---|
-| `BackupFreshness` | `Zuruck/Backup` | 1 = fresh, 0 = stale |
-| `HoursSinceLastBackup` | `Zuruck/Backup` | Hours since last object written |
-| `ObjectCount` | `Zuruck/Backup` | Number of objects per client prefix |
-| `SSMParameterAccessible` | `Zuruck/Backup` | 1 = accessible, 0 = error |
+All metrics are in the `Zuruck/Backup` namespace, dimensioned by `Client`.
+
+| Metric | Description |
+|---|---|
+| `BackupFreshness` | 1 = fresh, 0 = stale (vs. the client's `freshnessThresholdHours`) |
+| `BackupsExist` | 1 if any objects exist under the prefix, 0 otherwise |
+| `HoursSinceLastBackup` | Hours since the most recent object write (only published when `BackupsExist=1`) |
+| `ObjectCount` | Number of objects under the client prefix |
+| `SSMParameterAccessible` | 1 = master-password parameter decryptable by the checker, 0 = error |
 
 ### CloudWatch Alarms
 
 | Alarm | Trigger | Action |
 |---|---|---|
-| `zuruck-stale-backup-{client}` | No backup in 24h (configurable per client) | SNS → email |
-| `zuruck-bucket-size-anomaly` | Bucket > 100 GB | SNS → email |
+| `zuruck-stale-backup-{client}` | `BackupFreshness < 1` for one 1h period, OR the freshness checker is silent (missing data) | SNS → email |
+| `zuruck-freshness-checker-errors` | Lambda errors ≥ 1 in any 1h window — distinguishes "stale data" from "monitoring is broken" | SNS → email |
+| `zuruck-bucket-size-anomaly` | Sum of `BucketSizeBytes` across `StandardStorage`, `GlacierStorage`, and `DeepArchiveStorage` > 100 GiB | SNS → email |
 
 ### Dashboard
 
 The `zuruck-backup-health` CloudWatch dashboard shows:
-- Per-client freshness graphs
-- Bucket size over time
-- SSM parameter accessibility status
+- Per-client `BackupFreshness` and `HoursSinceLastBackup` graphs
+- Per-client `SSMParameterAccessible` status
+- Bucket size by storage class (Standard / Glacier / Deep Archive)
 
 ## Key Rotation
 
@@ -172,9 +180,11 @@ If a client key is compromised:
 
 ### IAM Access Key Rotation
 
-1. Create a new access key: `aws iam create-access-key --user-name restic-{client}`
-2. Update the client's environment file
-3. Delete the old key: `aws iam delete-access-key --user-name restic-{client} --access-key-id AKIA...`
+Access keys are stored in Secrets Manager (`zuruck/clients/{client}/access-key`),
+not in CloudFormation outputs. See the runbook's "Rotate IAM Access Keys"
+procedure for the full sequence: `aws iam create-access-key`, then
+`aws secretsmanager put-secret-value`, update the client env, delete the old
+IAM key.
 
 ## Disaster Recovery
 

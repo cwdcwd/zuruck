@@ -176,15 +176,35 @@ aws kms describe-key --key-id <kms-key-id>
 
 ### Rotate IAM Access Keys
 
+The CDK-managed access key is replaced on the next deploy if you delete it
+out of band — but to rotate cleanly without a redeploy, do it in IAM and
+update the Secrets Manager copy by hand:
+
 ```bash
-# Create new key
-aws iam create-access-key --user-name restic-alpha
+CLIENT=alpha
 
-# Update the client's /etc/restic/env with new credentials
+# 1. Create the new key
+aws iam create-access-key --user-name restic-${CLIENT}
+# Note the AccessKeyId / SecretAccessKey from the output.
 
-# Delete old key
-aws iam delete-access-key --user-name restic-alpha --access-key-id AKIA...
+# 2. Update Secrets Manager — value is the SecretAccessKey, AccessKeyId
+#    lives in the secret's Description.
+aws secretsmanager put-secret-value \
+  --secret-id zuruck/clients/${CLIENT}/access-key \
+  --secret-string "<new-secret-access-key>"
+aws secretsmanager update-secret \
+  --secret-id zuruck/clients/${CLIENT}/access-key \
+  --description "IAM secret access key for restic client '${CLIENT}'. AccessKeyId=<new-id>. Rotate via the runbook."
+
+# 3. Update the client's /etc/restic/env with the new credentials and
+#    confirm a backup runs cleanly.
+
+# 4. Delete the old key from IAM.
+aws iam delete-access-key --user-name restic-${CLIENT} --access-key-id AKIA...
 ```
+
+> Note: the Secrets Manager secret is the canonical source of truth for the
+> access key — never put it in a CloudFormation output.
 
 ### Rotate Restic Client Password
 
