@@ -130,7 +130,7 @@ info "Generating client password..."
 CLIENT_PASSWORD=$(openssl rand -base64 32)
 echo "${CLIENT_PASSWORD}" > /etc/restic/password
 chmod 600 /etc/restic/password
-chown root:root /etc/restic/password
+chown root:root /etc/restic/password 2>/dev/null || chown root:wheel /etc/restic/password
 info "Client password saved to /etc/restic/password"
 
 # ── Create environment file ─────────────────────────────────────────────
@@ -142,7 +142,7 @@ export RESTIC_REPOSITORY="s3:s3.${REGION}.amazonaws.com/${BUCKET_NAME}/${CLIENT_
 export RESTIC_PASSWORD_FILE="/etc/restic/password"
 EOF
 chmod 600 /etc/restic/env
-chown root:root /etc/restic/env
+chown root:root /etc/restic/env 2>/dev/null || chown root:wheel /etc/restic/env
 info "Environment file saved to /etc/restic/env"
 
 # ── Test connectivity ──────────────────────────────────────────────────
