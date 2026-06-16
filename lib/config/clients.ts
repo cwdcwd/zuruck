@@ -53,13 +53,13 @@ export const clientMasterPasswordParameterName = (name: string): string =>
  */
 export const CLIENTS: ClientConfig[] = [
   {
-    name: 'alpha',
-    description: 'Alpha production server',
+    name: 'lazybaer02',
+    description: 'work laptop',
     freshnessThresholdHours: 24,
   },
   {
-    name: 'bravo',
-    description: 'Bravo staging server',
+    name: 'fenster02',
+    description: 'windows desktop',
     freshnessThresholdHours: 48,
   },
 ];
