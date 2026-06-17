@@ -4,6 +4,30 @@
 
 This runbook covers common operational procedures for the Zuruck restic S3 backup system.
 
+## Initial Deployment Checklist
+
+For a new account, deploy with both hardening flags enabled:
+
+```bash
+npx cdk deploy \
+  -c alertEmails=ops@example.com,oncall@example.com \
+  -c objectLockRetentionDays=30 \
+  -c kmsAdminRoleArns=arn:aws:iam::<account>:role/<your-admin-role>
+```
+
+- **`objectLockRetentionDays=30`** enables S3 Object Lock (Governance, 30
+  days default per object). Must be set at bucket creation; existing buckets
+  need a manual recreation to gain Object Lock. See
+  [Backup Strategy → Object Lock](./backup-strategy.md#object-lock).
+- **`kmsAdminRoleArns=…`** restricts who can `ScheduleKeyDeletion`,
+  `DisableKey`, or `PutKeyPolicy` on the backup CMK. When unset, the key
+  policy falls back to `AccountRootPrincipal`, which means any IAM admin in
+  the account can permanently brick every backup. For shared accounts, this
+  is the highest-leverage hardening flag.
+- The KMS key has the maximum **30-day pending-deletion window**, so an
+  accidental `ScheduleKeyDeletion` is recoverable via `kms:CancelKeyDeletion`
+  for a month before the key is permanently gone.
+
 ## Adding a New Client
 
 1. Edit `lib/config/clients.ts` and add a new entry:
@@ -53,6 +77,14 @@ aws ssm get-parameter \
 5. Initialize the restic repository and add the client key (see [Client Setup Guide](./client-setup-guide.md))
 
 6. Distribute the client password and access keys to the client machine
+
+> **Note on the `Client` tag.** Every `restic-*` IAM user is tagged
+> `Client=<name>`. The bucket policy (see [backup-bucket.ts]) denies any
+> object operation by a `restic-*` principal to any path that doesn't
+> match `${aws:PrincipalTag/Client}/*`. If you add the user to a different
+> tag scheme or strip the `Client` tag, you'll lock the user out of the
+> bucket entirely — that's the safe failure mode. To grant access to a
+> different prefix, change the tag, don't widen the policy.
 
 ## Removing a Client
 
