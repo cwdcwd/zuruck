@@ -30,6 +30,45 @@ restic forget \
 
 > **Important**: Always run `forget` with `--prune` to actually free space. Without `--prune`, restic only marks snapshots for deletion but doesn't remove the data.
 
+## Object Lock
+
+For new deployments, set `-c objectLockRetentionDays=30` (or higher) when
+running `cdk deploy`. This enables S3 Object Lock in Governance mode with
+a default per-object retention. **It must be set at bucket creation** —
+existing deployments need a manual bucket recreation to enable it.
+
+### Why
+
+Versioning + 90-day noncurrent retention is recoverable but *not immutable*.
+A compromised client credential or an insider with `cdk deploy` could wait
+out the noncurrent window or shorten the retention and then wipe everything.
+Object Lock breaks both paths — within the lock window, even an account-admin
+cannot delete a current or noncurrent object version without the
+`s3:BypassGovernanceRetention` permission, which the CDK stack does not
+grant to anyone.
+
+### Trade-off: `restic forget --prune` will fail on locked objects
+
+`restic prune` deletes pack files that no longer have a referencing snapshot.
+With Object Lock active, that delete fails with `403` until the object ages
+past the lock window. The accommodation is straightforward:
+
+- During the lock window: run `restic forget --keep-…` **without** `--prune`
+  — this rewrites the index but leaves the actual pack files in place.
+- Once objects age past the lock window: run `restic prune` to actually
+  reclaim space.
+
+A reasonable schedule is `forget` daily, `prune` monthly. If you set the
+lock retention longer than the GFS hold-window for the smallest bucket
+(e.g., daily snapshots kept 7 days vs. a 30-day lock), expect storage
+cost to grow until the first `prune` runs.
+
+### Effect on Glacier transitions
+
+Object Lock and Glacier lifecycle transitions compose normally — locked
+objects still transition into Glacier and Deep Archive on schedule. The
+lock travels with the object across storage classes.
+
 ## Cold Storage Transitions
 
 S3 lifecycle rules automatically transition backup data through storage tiers:

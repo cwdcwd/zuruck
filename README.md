@@ -79,9 +79,25 @@ npx cdk bootstrap aws://<ACCOUNT_ID>/us-west-2
 # Deploy with alert emails
 npx cdk deploy -c alertEmails=you@example.com,team@example.com
 
+# Recommended for new deployments — enable S3 Object Lock and scope
+# the KMS admin principal to a named role.
+npx cdk deploy \
+  -c alertEmails=you@example.com \
+  -c objectLockRetentionDays=30 \
+  -c kmsAdminRoleArns=arn:aws:iam::<account>:role/<your-admin-role>
+
 # Or deploy without alerts
 npx cdk deploy
 ```
+
+#### Deploy-time context flags
+
+| Flag | Default | Description |
+|---|---|---|
+| `alertEmails` | none | Comma-separated email addresses for the SNS alert topic |
+| `region` | `CDK_DEFAULT_REGION` or `us-west-2` | AWS region (warns on drift) |
+| `objectLockRetentionDays` | `0` (disabled) | S3 Object Lock default Governance retention. Must be set at bucket creation; cannot be enabled later without recreating the bucket. Recommended: `30`. With Object Lock active, `restic forget --prune` will fail on objects still inside the lock window — see [Backup Strategy](docs/backup-strategy.md#object-lock). |
+| `kmsAdminRoleArns` | account root | Comma-separated IAM role ARNs allowed to administer the KMS CMK. When set, every other principal — including account-admins — is explicitly denied `kms:ScheduleKeyDeletion`, `kms:DisableKey`, and `kms:PutKeyPolicy`. |
 
 ### Add a New Client
 
@@ -155,14 +171,18 @@ zuruck/
 
 | Feature | Implementation |
 |---|---|
-| **Encryption** | SSE-KMS with customer-managed CMK (auto-rotation) |
-| **Isolation** | Per-client IAM users with prefix-scoped S3 policies |
+| **Encryption** | SSE-KMS with customer-managed CMK (auto-rotation, max 30-day pending-delete window) |
+| **KMS administration** | Optional `kmsAdminRoleArns` context scopes `kms:*` to named roles; `ScheduleKeyDeletion`/`DisableKey`/`PutKeyPolicy` explicitly denied to everyone else |
+| **Isolation** | Per-client IAM users with prefix-scoped S3 policies, plus a bucket-policy backstop tied to `${aws:PrincipalTag/Client}` (defense in depth) |
+| **Immutability** | Optional S3 Object Lock (Governance, opt-in via `objectLockRetentionDays` context) — a compromised client cannot wipe objects within the lock window |
 | **Cold Storage** | S3 Standard → Glacier Flexible Retrieval (90d) → Deep Archive (365d) |
-| **Retention** | GFS: 7 daily / 4 weekly / 6 monthly / 2 yearly |
-| **Master passwords** | SSM Parameter Store (SecureString), generated server-side at deploy time and `RETAIN`ed across `cdk destroy` |
-| **Client access keys** | Secrets Manager (`zuruck/clients/{client}/access-key`) — never in CloudFormation outputs |
+| **Retention** | GFS: 7 daily / 4 weekly / 6 monthly / 2 yearly; noncurrent versions retained 90 days |
+| **Master passwords** | SSM Parameter Store (SecureString), generated server-side at deploy time and `RETAIN`ed across `cdk destroy`. Provisioner Lambda has no `kms:Decrypt` and `reservedConcurrentExecutions=1` |
+| **Client access keys** | Secrets Manager (`zuruck/clients/{client}/access-key`) — never in CloudFormation outputs; tagged `RotationCadenceDays=90` |
+| **Client S3 permissions** | `GetObject`, `PutObject`, `DeleteObject` on `<prefix>/*` only — no `DeleteObjectVersion`, so version history survives credential compromise |
 | **Restic keys** | Dual: client password local to each machine, master password in SSM for DR |
-| **Monitoring** | Hourly Lambda freshness checker; alarms for stale backups, Lambda errors, and bucket-size growth across all storage classes |
+| **Monitoring** | Hourly Lambda freshness checker; alarms for stale backups, Lambda errors, bucket-size growth across all storage classes, and bucket-config changes via CloudTrail |
+| **Transport security** | `enforceSSL` on the bucket; SNS topic denies non-TLS publish/subscribe |
 | **Dashboard** | Per-client freshness, SSM accessibility, Lambda errors, and bucket size by storage class |
 
 ## Useful Commands
