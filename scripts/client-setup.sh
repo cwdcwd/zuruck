@@ -125,12 +125,26 @@ info "Using restic: ${RESTIC_VERSION} (${RESTIC_BIN})"
 info "Creating /etc/restic directory..."
 sudo mkdir -p /etc/restic
 
+# Determine the user who will run restic. On Linux with systemd, that's root.
+# On macOS (or when run with sudo), use the calling user so they can source
+# the env file and read the password file.
+if [[ -n "${SUDO_USER:-}" ]]; then
+  RESTIC_OWNER="${SUDO_USER}"
+  info "Running with sudo — config files will be owned by ${RESTIC_OWNER}"
+else
+  RESTIC_OWNER="root"
+fi
+
 # ── Generate client password ────────────────────────────────────────────
 info "Generating client password..."
 CLIENT_PASSWORD=$(openssl rand -base64 32)
 echo "${CLIENT_PASSWORD}" | sudo tee /etc/restic/password >/dev/null
 sudo chmod 600 /etc/restic/password
-sudo chown root:root /etc/restic/password 2>/dev/null || sudo chown root:wheel /etc/restic/password
+if [[ "${RESTIC_OWNER}" == "root" ]]; then
+  sudo chown root:root /etc/restic/password 2>/dev/null || sudo chown root:wheel /etc/restic/password
+else
+  sudo chown "${RESTIC_OWNER}" /etc/restic/password
+fi
 info "Client password saved to /etc/restic/password"
 
 # ── Create environment file ─────────────────────────────────────────────
@@ -142,7 +156,11 @@ export RESTIC_REPOSITORY="s3:s3.${REGION}.amazonaws.com/${BUCKET_NAME}/${CLIENT_
 export RESTIC_PASSWORD_FILE="/etc/restic/password"
 EOF
 sudo chmod 600 /etc/restic/env
-sudo chown root:root /etc/restic/env 2>/dev/null || sudo chown root:wheel /etc/restic/env
+if [[ "${RESTIC_OWNER}" == "root" ]]; then
+  sudo chown root:root /etc/restic/env 2>/dev/null || sudo chown root:wheel /etc/restic/env
+else
+  sudo chown "${RESTIC_OWNER}" /etc/restic/env
+fi
 info "Environment file saved to /etc/restic/env"
 
 # ── Test connectivity ──────────────────────────────────────────────────
