@@ -53,8 +53,10 @@ sudo mkdir -p /etc/restic
 # Generate a random password
 openssl rand -base64 32 | sudo tee /etc/restic/password
 sudo chmod 600 /etc/restic/password
-# Linux uses root:root, macOS uses root:wheel
-sudo chown root:root /etc/restic/password 2>/dev/null || sudo chown root:wheel /etc/restic/password
+# On Linux (systemd runs restic as root):
+sudo chown root:root /etc/restic/password
+# On macOS (you run restic as your user):
+# sudo chown $(whoami) /etc/restic/password
 ```
 
 ## Step 3: Configure Environment
@@ -69,7 +71,10 @@ export RESTIC_REPOSITORY="s3:s3.us-west-2.amazonaws.com/<bucket-name>/<client-pr
 export RESTIC_PASSWORD_FILE="/etc/restic/password"
 EOF
 sudo chmod 600 /etc/restic/env
-sudo chown root:root /etc/restic/env 2>/dev/null || sudo chown root:wheel /etc/restic/env
+# On Linux (systemd runs restic as root):
+sudo chown root:root /etc/restic/env
+# On macOS (you run restic as your user):
+# sudo chown $(whoami) /etc/restic/env
 ```
 
 > **Important**: Replace `<your-access-key-id>`, `<your-secret-access-key>`, `<bucket-name>`, and `<client-prefix>` with the values from your administrator.
