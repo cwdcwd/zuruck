@@ -1,7 +1,6 @@
 import { S3Client, ListObjectsV2Command } from '@aws-sdk/client-s3';
 import { SSMClient, GetParameterCommand } from '@aws-sdk/client-ssm';
 import { CloudWatchClient, PutMetricDataCommand, MetricDatum } from '@aws-sdk/client-cloudwatch';
-import { standardRetryStrategy } from '@aws-sdk/middleware-retry';
 
 interface ClientConfig {
   name: string;
@@ -9,23 +8,87 @@ interface ClientConfig {
   thresholdHours: number;
 }
 
-// Use the standard retry strategy with backoff for S3 throttling protection.
-// The SDK v3 default is 3 retries; we keep that but make it explicit.
-const retryStrategy = standardRetryStrategy({ maxAttempts: 3 });
-
-const s3 = new S3Client({ retryStrategy });
-const ssm = new SSMClient({ retryStrategy });
-const cw = new CloudWatchClient({ retryStrategy });
+// SDK v3 retries with exponential backoff up to 3 attempts by default —
+// adequate for S3 throttling protection on a once-per-hour invocation.
+const s3 = new S3Client({ maxAttempts: 3 });
+const ssm = new SSMClient({ maxAttempts: 3 });
+const cw = new CloudWatchClient({ maxAttempts: 3 });
 
 // Timeout guard: Lambda has a 5-minute hard limit. We bail out 30 seconds
 // early so we can still flush whatever metrics we've collected so far.
 const TIMEOUT_MARGIN_MS = 30_000;
 const LAMBDA_TIMEOUT_MS = 5 * 60 * 1000;
 
+const CLIENT_NAME_PATTERN = /^[a-z][a-z0-9-]{1,32}$/;
+
+/**
+ * Validate the CLIENTS env var at cold-start time. A schema mismatch fails
+ * the cold start once and then the Lambda-error alarm pages the operator —
+ * which is much louder than the previous behaviour, where a malformed env
+ * var crashed every invocation silently.
+ *
+ * (Security-review finding I4.)
+ */
+function parseClients(raw: string | undefined): ClientConfig[] {
+  if (!raw) {
+    throw new Error('CLIENTS env var is missing');
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (err) {
+    throw new Error(`CLIENTS env var is not valid JSON: ${(err as Error).message}`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error('CLIENTS env var must be a JSON array');
+  }
+  return parsed.map((entry, i) => {
+    if (typeof entry !== 'object' || entry === null) {
+      throw new Error(`CLIENTS[${i}] is not an object`);
+    }
+    const obj = entry as Record<string, unknown>;
+    if (typeof obj.name !== 'string' || !CLIENT_NAME_PATTERN.test(obj.name)) {
+      throw new Error(`CLIENTS[${i}].name is missing or invalid`);
+    }
+    if (typeof obj.prefix !== 'string' || !obj.prefix.endsWith('/')) {
+      throw new Error(`CLIENTS[${i}].prefix is missing or does not end with '/'`);
+    }
+    if (typeof obj.thresholdHours !== 'number' || obj.thresholdHours <= 0) {
+      throw new Error(`CLIENTS[${i}].thresholdHours must be a positive number`);
+    }
+    return {
+      name: obj.name,
+      prefix: obj.prefix,
+      thresholdHours: obj.thresholdHours,
+    };
+  });
+}
+
+/**
+ * Trim an SDK error to the bits that are safe to log. We deliberately do NOT
+ * include the SDK's `$metadata` body or the request envelope — for SSM
+ * SecureString errors that body can include the parameter name, and a
+ * future logging diff that started serializing it would leak the master
+ * password. (Security-review S4.)
+ */
+function safeError(err: unknown): { name: string; message: string; code?: string } {
+  if (err instanceof Error) {
+    const codeful = err as Error & { name?: string; $metadata?: { httpStatusCode?: number } };
+    return {
+      name: codeful.name ?? 'Error',
+      message: codeful.message ?? '',
+      code: (err as { Code?: string }).Code,
+    };
+  }
+  return { name: 'UnknownError', message: String(err) };
+}
+
+const clientsAtStartup = parseClients(process.env.CLIENTS);
+
 export const handler = async (): Promise<void> => {
   const bucketName = process.env.BUCKET_NAME!;
   const namespace = process.env.METRIC_NAMESPACE ?? 'Zuruck/Backup';
-  const clients: ClientConfig[] = JSON.parse(process.env.CLIENTS!);
+  const clients = clientsAtStartup;
   const now = Date.now();
   const deadline = now + LAMBDA_TIMEOUT_MS - TIMEOUT_MARGIN_MS;
 
@@ -34,27 +97,20 @@ export const handler = async (): Promise<void> => {
   const dimsFor = (clientName: string) => [{ Name: 'Client', Value: clientName }];
 
   for (const client of clients) {
-    // Timeout guard: if we're approaching the Lambda deadline, stop iterating
-    // and flush whatever metrics we have. This prevents a total metric blackout
-    // when one client has millions of objects and paginating takes too long.
     if (Date.now() > deadline) {
       console.warn(
-        `Approaching Lambda timeout — skipping remaining clients after ${client.name}. ` +
-          `Partial metrics will be published. Consider increasing Lambda timeout or ` +
-          `reducing the number of objects per prefix.`,
+        `Approaching Lambda timeout — skipping remaining clients after ${client.name}.`,
       );
       break;
     }
 
     console.log(`Checking freshness for client: ${client.name}`);
 
-    // ── List objects under the client prefix ──────────────────────────
     let latestTimestamp = 0;
     let objectCount = 0;
     try {
       let continuationToken: string | undefined;
       do {
-        // Inner timeout guard: check before each pagination call.
         if (Date.now() > deadline) {
           console.warn(
             `Timeout during pagination for ${client.name} — publishing partial objectCount=${objectCount}`,
@@ -79,9 +135,7 @@ export const handler = async (): Promise<void> => {
         continuationToken = response.NextContinuationToken;
       } while (continuationToken);
     } catch (err) {
-      console.error(`Error listing objects for ${client.name}:`, err);
-      // Keep going to publish a 0 freshness signal — that pages the operator
-      // via the Lambda-error alarm, not via stale data.
+      console.error(`S3 list failed for ${client.name}:`, safeError(err));
       throw err;
     }
 
@@ -93,7 +147,6 @@ export const handler = async (): Promise<void> => {
       Unit: 'None',
       Timestamp: stamp,
     });
-
     metricData.push({
       MetricName: 'ObjectCount',
       Dimensions: dimsFor(client.name),
@@ -105,7 +158,6 @@ export const handler = async (): Promise<void> => {
     if (backupsExist) {
       const hoursSinceLastBackup = (now - latestTimestamp) / (1000 * 60 * 60);
       const isFresh = hoursSinceLastBackup <= client.thresholdHours ? 1 : 0;
-
       metricData.push({
         MetricName: 'BackupFreshness',
         Dimensions: dimsFor(client.name),
@@ -120,15 +172,11 @@ export const handler = async (): Promise<void> => {
         Unit: 'None',
         Timestamp: stamp,
       });
-
       console.log(
         `Client ${client.name}: hoursSinceLastBackup=${hoursSinceLastBackup.toFixed(2)}, ` +
           `isFresh=${isFresh}, objectCount=${objectCount}`,
       );
     } else {
-      // No objects yet for this client (newly onboarded, or wiped). Publish
-      // BackupFreshness=0 so the alarm trips, but skip HoursSinceLastBackup
-      // — a sentinel like 9999 would skew anomaly detection.
       metricData.push({
         MetricName: 'BackupFreshness',
         Dimensions: dimsFor(client.name),
@@ -136,15 +184,18 @@ export const handler = async (): Promise<void> => {
         Unit: 'None',
         Timestamp: stamp,
       });
-
       console.log(`Client ${client.name}: no backups found yet (objectCount=0)`);
     }
 
-    // ── Verify SSM master-password parameter is decryptable ───────────
+    // Verify the SSM master-password parameter exists. We pass
+    // `WithDecryption: false` so the cleartext value never enters the
+    // Lambda's memory. Existence is enough to prove the parameter wasn't
+    // accidentally deleted — full decryptability is a separate canary
+    // problem. (Security-review S4.)
     try {
       await ssm.send(new GetParameterCommand({
         Name: `/zuruck/restic/${client.name}/master-password`,
-        WithDecryption: true,
+        WithDecryption: false,
       }));
       metricData.push({
         MetricName: 'SSMParameterAccessible',
@@ -154,7 +205,7 @@ export const handler = async (): Promise<void> => {
         Timestamp: stamp,
       });
     } catch (err) {
-      console.error(`SSM parameter check failed for ${client.name}:`, err);
+      console.error(`SSM parameter check failed for ${client.name}:`, safeError(err));
       metricData.push({
         MetricName: 'SSMParameterAccessible',
         Dimensions: dimsFor(client.name),
@@ -165,7 +216,6 @@ export const handler = async (): Promise<void> => {
     }
   }
 
-  // CloudWatch limits: 20 metrics per PutMetricData call.
   for (let i = 0; i < metricData.length; i += 20) {
     await cw.send(new PutMetricDataCommand({
       Namespace: namespace,

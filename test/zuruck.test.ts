@@ -207,6 +207,134 @@ describe('ZuruckStack', () => {
     });
   });
 
+  test('client S3 policy does NOT grant s3:DeleteObjectVersion (S1)', () => {
+    const template = synth();
+    const policies = template.findResources('AWS::IAM::Policy', {
+      Properties: { PolicyName: Match.stringLikeRegexp('^restic-s3-') },
+    });
+    expect(Object.keys(policies).length).toBe(CLIENTS.length);
+    for (const [, resource] of Object.entries(policies)) {
+      const props = (resource as { Properties: { PolicyDocument: { Statement: Array<{ Action: string | string[] }> } } }).Properties;
+      const allActions = props.PolicyDocument.Statement.flatMap(s =>
+        Array.isArray(s.Action) ? s.Action : [s.Action],
+      );
+      expect(allActions).not.toContain('s3:DeleteObjectVersion');
+    }
+  });
+
+  test('S3 bucket has Object Lock support enabled when objectLockRetentionDays > 0 (S2)', () => {
+    const app = new cdk.App();
+    const stack = new ZuruckStack(app, 'TestStack', { objectLockRetentionDays: 30 });
+    const template = Template.fromStack(stack);
+    template.hasResourceProperties('AWS::S3::Bucket', {
+      ObjectLockEnabled: true,
+      ObjectLockConfiguration: Match.objectLike({
+        Rule: Match.objectLike({
+          DefaultRetention: Match.objectLike({
+            Mode: 'GOVERNANCE',
+            Days: 30,
+          }),
+        }),
+      }),
+    });
+  });
+
+  test('KMS key has 30-day pendingWindow (S3)', () => {
+    synth().hasResourceProperties('AWS::KMS::Key', {
+      PendingWindowInDays: 30,
+    });
+  });
+
+  test('KMS key adds explicit Deny on destructive actions when admin roles are scoped (S3)', () => {
+    const app = new cdk.App();
+    const stack = new ZuruckStack(app, 'TestStack', {
+      kmsAdminRoleArns: ['arn:aws:iam::111111111111:role/ZuruckAdmin'],
+    });
+    const template = Template.fromStack(stack);
+    const keys = template.findResources('AWS::KMS::Key');
+    const policyJson = JSON.stringify(keys);
+    expect(policyJson).toContain('DenyDestructiveActionsToNonAdmins');
+    expect(policyJson).toContain('kms:ScheduleKeyDeletion');
+  });
+
+  test('SNS alert topic denies non-TLS publish/subscribe (S6)', () => {
+    const template = synth();
+    const policies = template.findResources('AWS::SNS::TopicPolicy');
+    const policyJson = JSON.stringify(policies);
+    expect(policyJson).toContain('DenyInsecureTransport');
+    expect(policyJson).toContain('aws:SecureTransport');
+  });
+
+  test('S3 bucket policy includes cross-client deny backstop (S7)', () => {
+    const template = synth();
+    const policies = template.findResources('AWS::S3::BucketPolicy');
+    const policyJson = JSON.stringify(policies);
+    expect(policyJson).toContain('DenyCrossClientPrefixAccess');
+    expect(policyJson).toContain('aws:PrincipalTag/Client');
+  });
+
+  test('IAM users are tagged with their Client name (S7)', () => {
+    const template = synth();
+    for (const client of CLIENTS) {
+      template.hasResourceProperties('AWS::IAM::User', {
+        UserName: `restic-${client.name}`,
+        Tags: Match.arrayWith([
+          Match.objectLike({ Key: 'Client', Value: client.name }),
+        ]),
+      });
+    }
+  });
+
+  test('EventBridge rule pages on bucket-config changes (S8)', () => {
+    synth().hasResourceProperties('AWS::Events::Rule', {
+      Name: 'zuruck-bucket-config-changes',
+      EventPattern: Match.objectLike({
+        source: ['aws.s3'],
+        detail: Match.objectLike({
+          eventName: Match.arrayWith(['DeleteBucket', 'PutBucketPolicy']),
+        }),
+      }),
+    });
+  });
+
+  test('provisioner Lambda has reservedConcurrentExecutions=1 (S5)', () => {
+    const template = synth();
+    const fns = template.findResources('AWS::Lambda::Function');
+    const provisioner = Object.entries(fns).find(([k]) => k.includes('PasswordProvisioner'));
+    expect(provisioner).toBeDefined();
+    const props = (provisioner![1] as { Properties: { ReservedConcurrentExecutions?: number } }).Properties;
+    expect(props.ReservedConcurrentExecutions).toBe(1);
+  });
+
+  test('provisioner Lambda role does NOT have kms:Decrypt (S5)', () => {
+    const template = synth();
+    const policies = template.findResources('AWS::IAM::Policy');
+    // Find any policy attached to the provisioner role
+    for (const [, resource] of Object.entries(policies)) {
+      const props = (resource as { Properties: { Roles?: Array<{ Ref?: string }>; PolicyDocument: { Statement: Array<{ Action: string | string[]; Resource: unknown }> } } }).Properties;
+      const rolesJson = JSON.stringify(props.Roles ?? []);
+      if (!rolesJson.includes('PasswordProvisioner')) continue;
+      const allActions = props.PolicyDocument.Statement.flatMap(s =>
+        Array.isArray(s.Action) ? s.Action : [s.Action],
+      );
+      expect(allActions).not.toContain('kms:Decrypt');
+    }
+  });
+
+  test('freshness checker role does NOT have kms:Decrypt on the bucket CMK (S4)', () => {
+    const template = synth();
+    const policies = template.findResources('AWS::IAM::Policy');
+    for (const [, resource] of Object.entries(policies)) {
+      const props = (resource as { Properties: { Roles?: Array<{ Ref?: string }>; PolicyDocument: { Statement: Array<{ Action: string | string[] }> } } }).Properties;
+      const rolesJson = JSON.stringify(props.Roles ?? []);
+      if (!rolesJson.includes('FreshnessChecker')) continue;
+      const allActions = props.PolicyDocument.Statement.flatMap(s =>
+        Array.isArray(s.Action) ? s.Action : [s.Action],
+      );
+      expect(allActions).not.toContain('kms:Decrypt');
+    }
+  });
+
   test('no client S3 policy grants access to another client prefix', () => {
     const template = synth();
     const policies = template.findResources('AWS::IAM::Policy', {

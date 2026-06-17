@@ -237,3 +237,77 @@ aws s3api restore-object --bucket <bucket-name> --key <key> \
 - Rotate IAM access keys every 90 days
 - Use `RESTIC_PASSWORD_FILE` instead of `RESTIC_PASSWORD` environment variable (more secure, doesn't show in `ps`)
 - Restrict `/etc/restic/env` and `/etc/restic/password` to `root:root 600`
+- A compromised client credential cannot wipe the bucket's version history
+  unless the attacker waits out the noncurrent retention window (90 days);
+  with Object Lock enabled (recommended for new deployments — see
+  [backup-strategy.md](./backup-strategy.md)), even that path is closed.
+
+### Hardening: Encrypt `/etc/restic/env` at rest
+
+The default install writes the AWS secret access key to `/etc/restic/env`
+in cleartext. The file is `chmod 600` so only root can read it, but a host
+filesystem snapshot, backup, or `dd` captures the secret. For laptops
+and any machine you don't fully trust, encrypt the env file so it's only
+readable by the systemd service that needs it. (Security-review S12.)
+
+#### Linux (systemd ≥ 250)
+
+Encrypt the env file with `systemd-creds`:
+
+```bash
+sudo systemd-creds encrypt --name=AWS_SECRET_ACCESS_KEY \
+  - /etc/restic/aws_secret.cred <<<"$SECRET_ACCESS_KEY"
+sudo chmod 600 /etc/restic/aws_secret.cred
+```
+
+Update the service unit to load the credential:
+
+```ini
+[Service]
+Type=oneshot
+LoadCredentialEncrypted=AWS_SECRET_ACCESS_KEY:/etc/restic/aws_secret.cred
+EnvironmentFile=/etc/restic/env_public  # contains everything *except* the secret
+ExecStartPre=/bin/sh -c 'export AWS_SECRET_ACCESS_KEY=$(cat $CREDENTIALS_DIRECTORY/AWS_SECRET_ACCESS_KEY); /usr/bin/restic backup /data'
+```
+
+Now the secret is decryptable only by this service when systemd has unlocked
+the host (TPM-bound on most modern Linux installs).
+
+#### macOS (Keychain)
+
+```bash
+# Store the secret once
+security add-generic-password -a "$(whoami)" -s zuruck-aws-secret -w "$SECRET_ACCESS_KEY"
+
+# In your launchd ProgramArguments wrapper:
+export AWS_SECRET_ACCESS_KEY=$(security find-generic-password -a "$(whoami)" -s zuruck-aws-secret -w)
+```
+
+### Pinning restic version
+
+Distro packages can lag behind upstream and don't expose a checksum-pinning
+workflow. For a hardened install, fetch the upstream binary with
+`--restic-version` + `--restic-sha256`:
+
+```bash
+sudo SECRET_ACCESS_KEY=... ./scripts/client-setup.sh \
+  --client-name alpha \
+  --bucket zuruck-backup-... \
+  --access-key-id AKIA... \
+  --install-restic \
+  --restic-version 0.17.3 \
+  --restic-sha256 <sha256-from-github-release>
+```
+
+Look up the SHA256 at <https://github.com/restic/restic/releases>.
+(Security-review S14.)
+
+### Accepted risk: prefix-name reconnaissance
+
+A compromised client can probe whether other client prefixes exist (e.g.
+`bravo/`, `gamma/`) by listing them — IAM `s3:ListBucket` policies in S3
+condition on the `s3:prefix` parameter, not on the bucket contents.
+The probe only confirms existence; it does not give read access. The
+recommended mitigations are: (a) name prefixes with non-guessable suffixes
+(`alpha-7f3a/`), or (b) accept the leakage. We currently accept it.
+(Security-review S9.)

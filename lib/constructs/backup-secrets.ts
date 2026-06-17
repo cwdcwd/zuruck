@@ -57,6 +57,10 @@ export class BackupSecrets extends Construct {
       entry: `${__dirname}/../lambda/master-password-provisioner.ts`,
       timeout: cdk.Duration.minutes(2),
       logGroup: onEventLogGroup,
+      // Cap concurrency: this Lambda only runs at deploy time. A leaked
+      // invoker shouldn't be able to flood SSM in parallel.
+      // (Security-review S5.)
+      reservedConcurrentExecutions: 1,
       bundling: {
         minify: true,
         sourceMap: true,
@@ -75,9 +79,16 @@ export class BackupSecrets extends Construct {
       ],
     }));
 
+    // Encrypt + GenerateDataKey are sufficient for PutParameter with
+    // SecureString. We deliberately do NOT grant kms:Decrypt — the
+    // provisioner never reads existing master passwords; it only checks for
+    // existence (which doesn't decrypt) and writes new ones. Without
+    // kms:Decrypt, an attacker who hijacks this role cannot read SSM
+    // SecureStrings or S3 objects encrypted with the same CMK.
+    // (Security-review S5.)
     onEventHandler.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: ['kms:Encrypt', 'kms:GenerateDataKey', 'kms:Decrypt'],
+      actions: ['kms:Encrypt', 'kms:GenerateDataKey'],
       resources: [props.encryptionKey.keyArn],
     }));
 

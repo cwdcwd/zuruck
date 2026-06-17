@@ -29,6 +29,8 @@ SECRET_ACCESS_KEY=""
 REGION="us-west-2"
 BACKUP_PATHS=()
 INSTALL_RESTIC=false
+RESTIC_VERSION_PIN=""
+RESTIC_SHA256=""
 
 usage() {
   cat <<EOF
@@ -48,6 +50,12 @@ Optional:
   --region REGION            AWS region (default: us-west-2)
   --backup-path PATH         Path to back up (can be specified multiple times)
   --install-restic           Install restic if not found
+  --restic-version VERSION   Pin a specific upstream restic version
+                             (e.g., 0.17.3). Overrides apt/yum.
+  --restic-sha256 SHA256     Required when --restic-version is used. The
+                             SHA256 of the upstream tarball — verified
+                             before install. See:
+                             https://github.com/restic/restic/releases
   -h, --help                 Show this help message
 
 Example:
@@ -72,6 +80,8 @@ while [[ $# -gt 0 ]]; do
     --region)           REGION="$2"; shift 2 ;;
     --backup-path)      BACKUP_PATHS+=("$2"); shift 2 ;;
     --install-restic)   INSTALL_RESTIC=true; shift ;;
+    --restic-version)   RESTIC_VERSION_PIN="$2"; shift 2 ;;
+    --restic-sha256)    RESTIC_SHA256="$2"; shift 2 ;;
     -h|--help)          usage ;;
     *)                  error "Unknown option: $1" ;;
   esac
@@ -81,6 +91,12 @@ done
 [[ -z "$CLIENT_NAME" ]] && error "Missing required argument: --client-name"
 [[ -z "$BUCKET_NAME" ]] && error "Missing required argument: --bucket"
 [[ -z "$ACCESS_KEY_ID" ]] && error "Missing required argument: --access-key-id"
+
+# Validate client name shape — must match ClientConfig.name in clients.ts.
+# (Security-review I1/I3.)
+if [[ ! "$CLIENT_NAME" =~ ^[a-z][a-z0-9-]{1,32}$ ]]; then
+  error "Invalid client name '$CLIENT_NAME': must match ^[a-z][a-z0-9-]{1,32}$"
+fi
 
 # Resolve secret access key: prefer env var > CLI arg > interactive prompt.
 # SECURITY: --secret-access-key on the command line is visible in ps(1) and
@@ -92,7 +108,11 @@ if [[ -z "$SECRET_ACCESS_KEY" ]]; then
   else
     warn "--secret-access-key not provided and SECRET_ACCESS_KEY env var not set."
     warn "You will be prompted for the secret access key (input hidden)."
+    # Restore terminal echo on any exit path: an interrupted `read -rs` can
+    # otherwise leave the user with a broken terminal. (Security-review S13.)
+    trap 'stty echo 2>/dev/null || true' EXIT INT TERM
     read -rs SECRET_ACCESS_KEY </dev/tty
+    trap - EXIT INT TERM
     [[ -z "$SECRET_ACCESS_KEY" ]] && error "Secret access key is required."
   fi
 fi
@@ -100,20 +120,70 @@ fi
 info "Setting up restic backup client: ${CLIENT_NAME}"
 
 # ── Install restic ──────────────────────────────────────────────────────
+# When --restic-version + --restic-sha256 are passed, fetch the upstream
+# binary and verify its SHA256 before installing. This is the recommended
+# path: distro packages can lag behind upstream and don't expose a
+# checksum-pinning workflow. (Security-review S14.)
+install_restic_pinned() {
+  local version="$1"
+  local expected_sha="$2"
+  local arch
+  case "$(uname -m)" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *) error "Unsupported architecture: $(uname -m)" ;;
+  esac
+  local os
+  case "$(uname)" in
+    Linux) os="linux" ;;
+    Darwin) os="darwin" ;;
+    *) error "Unsupported OS: $(uname)" ;;
+  esac
+  local file="restic_${version}_${os}_${arch}.bz2"
+  local url="https://github.com/restic/restic/releases/download/v${version}/${file}"
+  local tmp
+  tmp=$(mktemp -d)
+  trap "rm -rf '$tmp'" RETURN
+  info "Downloading $url ..."
+  curl -fsSL "$url" -o "$tmp/$file"
+  local actual_sha
+  actual_sha=$(sha256sum "$tmp/$file" 2>/dev/null | awk '{print $1}')
+  if [[ -z "$actual_sha" ]]; then
+    actual_sha=$(shasum -a 256 "$tmp/$file" | awk '{print $1}')
+  fi
+  if [[ "$actual_sha" != "$expected_sha" ]]; then
+    error "SHA256 mismatch for $file. Expected: $expected_sha. Got: $actual_sha"
+  fi
+  info "SHA256 verified: $actual_sha"
+  bzip2 -d "$tmp/$file"
+  local bin="${file%.bz2}"
+  chmod +x "$tmp/$bin"
+  sudo mv "$tmp/$bin" /usr/local/bin/restic
+  trap - RETURN
+}
+
 if ! command -v restic &>/dev/null; then
   if [[ "$INSTALL_RESTIC" == true ]]; then
-    info "Installing restic..."
-    if command -v apt-get &>/dev/null; then
-      apt-get update -qq && apt-get install -y -qq restic
-    elif command -v yum &>/dev/null; then
-      yum install -y restic
-    elif command -v brew &>/dev/null; then
-      brew install restic
+    if [[ -n "$RESTIC_VERSION_PIN" ]]; then
+      [[ -z "$RESTIC_SHA256" ]] && error "--restic-version requires --restic-sha256 (look up at https://github.com/restic/restic/releases)"
+      info "Installing restic ${RESTIC_VERSION_PIN} (SHA256-pinned)..."
+      install_restic_pinned "$RESTIC_VERSION_PIN" "$RESTIC_SHA256"
     else
-      error "Cannot install restic automatically. Please install it manually: https://restic.readthedocs.io/en/stable/020_installation.html"
+      warn "Installing restic via the system package manager — version is not pinned and apt/yum sources are trusted by this script."
+      warn "For a hardened install, re-run with --restic-version X.Y.Z --restic-sha256 <hash>."
+      info "Installing restic..."
+      if command -v apt-get &>/dev/null; then
+        apt-get update -qq && apt-get install -y -qq restic
+      elif command -v yum &>/dev/null; then
+        yum install -y restic
+      elif command -v brew &>/dev/null; then
+        brew install restic
+      else
+        error "Cannot install restic automatically. Please install it manually: https://restic.readthedocs.io/en/stable/020_installation.html"
+      fi
     fi
   else
-    error "restic not found. Install it with --install-restic or manually: https://restic.readthedocs.io/en/stable/020_installation.html"
+    error "restic not found. Install it with --install-restic [--restic-version X.Y.Z --restic-sha256 <hash>] or manually: https://restic.readthedocs.io/en/stable/020_installation.html"
   fi
 fi
 
@@ -176,9 +246,24 @@ if command -v aws &>/dev/null; then
     warn "S3 connectivity test failed. Check credentials and bucket name."
     warn "Manual test: source /etc/restic/env && aws s3 ls s3://${BUCKET_NAME}/${CLIENT_NAME}/"
   fi
+
+  # Verify the client's SSM master-password parameter exists. If it doesn't,
+  # the client name is almost certainly a typo or wasn't deployed via CDK.
+  # We use --query 'Parameter.Name' (no decryption) so the cleartext value
+  # never enters this shell. (Security-review I1.)
+  info "Verifying CDK-side client registration..."
+  if aws ssm get-parameter \
+      --name "/zuruck/restic/${CLIENT_NAME}/master-password" \
+      --region "${REGION}" \
+      --query 'Parameter.Name' --output text &>/dev/null; then
+    info "Client '${CLIENT_NAME}' is registered server-side."
+  else
+    warn "Could not find /zuruck/restic/${CLIENT_NAME}/master-password in SSM."
+    warn "Either the client wasn't deployed via CDK, or this credential lacks ssm:GetParameter."
+  fi
 else
-  warn "aws CLI not found — skipping S3 connectivity test."
-  warn "Restic does not require the AWS CLI, but the test does."
+  warn "aws CLI not found — skipping S3 + SSM connectivity tests."
+  warn "Restic does not require the AWS CLI, but these checks do."
   warn "Install the AWS CLI or test manually: source /etc/restic/env && restic snapshots"
 fi
 

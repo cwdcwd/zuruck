@@ -70,6 +70,18 @@ export class BackupMonitoring extends Construct {
       masterKey: props.encryptionKey,
     });
 
+    // Refuse plain-HTTP publish/subscribe. Email is out of band, but the
+    // moment anyone adds an HTTPS or Lambda subscription, this guard kicks
+    // in. (Security-review S6.)
+    this.alertTopic.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'DenyInsecureTransport',
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: ['sns:Publish', 'sns:Subscribe'],
+      resources: [this.alertTopic.topicArn],
+      conditions: { Bool: { 'aws:SecureTransport': 'false' } },
+    }));
+
     for (const email of props.alertEmails ?? []) {
       this.alertTopic.addSubscription(new snsSubscriptions.EmailSubscription(email));
     }
@@ -104,17 +116,33 @@ export class BackupMonitoring extends Construct {
       },
     });
 
-    props.bucket.grantRead(this.freshnessChecker);
-
+    // Grant only what the checker needs: ListBucket for object enumeration
+    // and GetBucketLocation for SDK region resolution. Crucially, NOT
+    // GetObject — the checker only inspects metadata (LastModified) which
+    // is returned by ListObjectsV2 without ever decrypting an object. That
+    // also means the role does not need kms:Decrypt on the bucket CMK,
+    // which narrows the blast radius of a Lambda RCE. (Security-review S4.)
     this.freshnessChecker.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
-      actions: ['ssm:GetParameter'],
+      actions: ['s3:ListBucket', 's3:GetBucketLocation'],
+      resources: [props.bucket.bucketArn],
+    }));
+
+    // The checker only needs to verify the parameter exists. It does NOT
+    // need WithDecryption=true (and no longer asks for it) — that would
+    // bring the cleartext master password into the Lambda response, where
+    // any future logging diff could leak it. (Security-review S4.)
+    this.freshnessChecker.addToRolePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      actions: ['ssm:GetParameter', 'ssm:DescribeParameters'],
       resources: [
         `arn:aws:ssm:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:parameter/zuruck/restic/*`,
       ],
     }));
-
-    props.encryptionKey.grantDecrypt(this.freshnessChecker);
+    // No KMS grant: with WithDecryption=false the SSM call doesn't touch KMS.
+    // Removing kms:Decrypt here narrows the blast radius of a Lambda RCE — an
+    // attacker with the freshness checker's role can no longer decrypt S3
+    // objects or the master-password SecureStrings. (Security-review S4.)
 
     this.freshnessChecker.addToRolePolicy(new iam.PolicyStatement({
       effect: iam.Effect.ALLOW,
@@ -208,6 +236,39 @@ export class BackupMonitoring extends Construct {
     });
 
     bucketSizeAlarm.addAlarmAction(alarmAction);
+
+    // ── EventBridge: Mass-delete detection ────────────────────────────
+    // Page on any CloudTrail S3 management event that touches our bucket
+    // with `DeleteBucket*` or `PutBucketPolicy` (state-changing actions
+    // that should never happen in steady state). For object-level mass
+    // deletes (`DeleteObjects` in volumes), enable CloudTrail S3
+    // data-events on the bucket and route those to this same topic.
+    // (Security-review S8.)
+    const sensitiveBucketEventsRule = new events.Rule(this, 'SensitiveBucketEvents', {
+      ruleName: 'zuruck-bucket-config-changes',
+      description: 'Page when someone changes bucket-level config or attempts to delete the bucket',
+      eventPattern: {
+        source: ['aws.s3'],
+        detailType: ['AWS API Call via CloudTrail'],
+        detail: {
+          eventSource: ['s3.amazonaws.com'],
+          eventName: [
+            'DeleteBucket',
+            'DeleteBucketPolicy',
+            'DeleteBucketEncryption',
+            'PutBucketAcl',
+            'PutBucketPolicy',
+            'PutBucketVersioning',
+            'PutBucketPublicAccessBlock',
+            'PutObjectLockConfiguration',
+          ],
+          requestParameters: {
+            bucketName: [props.bucket.bucketName],
+          },
+        },
+      },
+    });
+    sensitiveBucketEventsRule.addTarget(new targets.SnsTopic(this.alertTopic));
 
     // ── CloudWatch Dashboard ──────────────────────────────────────────
     this.dashboard = new cloudwatch.Dashboard(this, 'Dashboard', {

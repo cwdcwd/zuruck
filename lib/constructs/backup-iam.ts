@@ -11,51 +11,31 @@ import {
 } from '../config/clients';
 
 export interface BackupIamProps {
-  /**
-   * The S3 bucket that clients will back up to.
-   */
   readonly bucket: s3.Bucket;
-
-  /**
-   * The KMS key used for S3 encryption.
-   */
   readonly encryptionKey: kms.Key;
-
-  /**
-   * The IAM group that backup client users belong to.
-   */
   readonly clientGroup: iam.Group;
-
-  /**
-   * Client configurations.
-   */
   readonly clients: ClientConfig[];
 }
 
 export interface ClientIamResources {
-  /**
-   * The IAM user for this client.
-   */
   readonly user: iam.User;
-
-  /**
-   * Secrets Manager secret holding the client's access key id and secret in
-   * the form `{"AccessKeyId":"...","SecretAccessKey":"..."}`. The secret
-   * itself is the only sanctioned channel for retrieving the secret access
-   * key — never via stack outputs.
-   */
   readonly credentialsSecret: secretsmanager.Secret;
-
-  /**
-   * The S3 prefix for this client (e.g., "alpha/").
-   */
   readonly prefix: string;
 }
 
+/**
+ * Per-client IAM users + scoped policies.
+ *
+ * Each user is tagged `Client=<name>` so the bucket's resource-policy
+ * backstop in BackupBucket can use `${aws:PrincipalTag/Client}` to enforce
+ * per-prefix isolation independently of the identity-based policy here.
+ *
+ * The S3 policy intentionally does NOT include `s3:DeleteObjectVersion`:
+ * `restic forget --prune` only needs `s3:DeleteObject` on current versions;
+ * granting DeleteObjectVersion to a long-lived client credential would let
+ * a compromised client wipe its full version history. (Security-review S1.)
+ */
 export class BackupIam extends Construct {
-  /**
-   * Map of client name to IAM resources.
-   */
   public readonly clientResources: Map<string, ClientIamResources> = new Map();
 
   constructor(scope: Construct, id: string, props: BackupIamProps) {
@@ -66,38 +46,33 @@ export class BackupIam extends Construct {
       const bucketArn = props.bucket.bucketArn;
       const objectArnPrefix = `${bucketArn}/${prefix}`;
 
-      // Create IAM user for this client
       const user = new iam.User(this, `User-${client.name}`, {
         userName: `restic-${client.name}`,
         groups: [props.clientGroup],
       });
+      // The bucket's resource-policy backstop matches on `${aws:PrincipalTag/Client}`.
+      cdk.Tags.of(user).add('Client', client.name);
+      cdk.Tags.of(user).add('Purpose', 'restic-backup-client');
 
-      // S3 policy: scoped to this client's prefix only.
       const s3Policy = new iam.Policy(this, `S3Policy-${client.name}`, {
         policyName: `restic-s3-${client.name}`,
         statements: [
-          // s3:ListBucket is conditioned on the client's prefix so the client
-          // can only enumerate objects under their own path. Note: this does NOT
-          // prevent listing the bucket root (without a prefix parameter) — the
-          // client can see all prefix names in the bucket. This is acceptable
-          // because restic always specifies a prefix, and the object-level
-          // policy below gates actual data access. If you need to prevent even
-          // prefix enumeration, add an explicit Deny on s3:ListBucket without
-          // a prefix condition.
+          // s3:ListBucket is conditioned on the client's prefix. Note this
+          // does not prevent prefix-name reconnaissance: a client can probe
+          // for the existence of `bravo/` etc. (Security-review S9 —
+          // accepted risk; documented in pr-review.md.)
           new iam.PolicyStatement({
             effect: iam.Effect.ALLOW,
             actions: ['s3:ListBucket'],
             resources: [bucketArn],
             conditions: {
-              StringLike: {
-                's3:prefix': [`${prefix}*`],
-              },
+              StringLike: { 's3:prefix': [`${prefix}*`] },
             },
           }),
-          // CRUD on objects under their prefix. AbortMultipartUpload and
-          // ListMultipartUploadParts are required by restic for files >100MB
-          // — without them large uploads fail mid-stream and leak parts that
-          // only the bucket lifecycle eventually reaps.
+          // CRUD on objects under their prefix. NO DeleteObjectVersion —
+          // versioning soft-delete must survive a client compromise.
+          // AbortMultipartUpload / ListMultipartUploadParts are required by
+          // restic for files >100MB.
           new iam.PolicyStatement({
             effect: iam.Effect.ALLOW,
             actions: [
@@ -105,7 +80,6 @@ export class BackupIam extends Construct {
               's3:PutObject',
               's3:DeleteObject',
               's3:GetObjectVersion',
-              's3:DeleteObjectVersion',
               's3:AbortMultipartUpload',
               's3:ListMultipartUploadParts',
             ],
@@ -120,7 +94,6 @@ export class BackupIam extends Construct {
       });
       s3Policy.attachToUser(user);
 
-      // SSM policy: allow reading their own master password parameter.
       const ssmPolicy = new iam.Policy(this, `SsmPolicy-${client.name}`, {
         policyName: `restic-ssm-${client.name}`,
         statements: [
@@ -139,21 +112,23 @@ export class BackupIam extends Construct {
         user: user,
       });
 
-      // Persist the access key into Secrets Manager rather than a CFN output.
-      // Stack outputs land in the CloudFormation template (asset-staged to
-      // S3) and in any process that prints them, so anyone with
-      // `cloudformation:DescribeStacks` would read the secret access key.
-      // We store only the SecretAccessKey in the secret value (the AccessKeyId
-      // is not sensitive on its own) and pass the intrinsic directly so the
-      // value is never materialized into the synthesized template.
+      // Persist the access key to Secrets Manager rather than to a CFN
+      // output. Stack outputs are readable by anyone with
+      // `cloudformation:DescribeStacks`; Secrets Manager has its own ACL
+      // surface and audit trail. We store only the SecretAccessKey as the
+      // secret value — the AccessKeyId itself is not sensitive on its own
+      // and lives in the secret's Description for easy lookup.
       const credentialsSecret = new secretsmanager.Secret(this, `Credentials-${client.name}`, {
         secretName: `zuruck/clients/${client.name}/access-key`,
         description:
           `IAM secret access key for restic client '${client.name}'. ` +
-          `AccessKeyId=${accessKey.accessKeyId}. Rotate via the runbook.`,
+          `AccessKeyId=${accessKey.accessKeyId}. ` +
+          `RotationCadenceDays=90. Rotate via the runbook.`,
         encryptionKey: props.encryptionKey,
         secretStringValue: accessKey.secretAccessKey,
       });
+      cdk.Tags.of(credentialsSecret).add('Client', client.name);
+      cdk.Tags.of(credentialsSecret).add('RotationCadenceDays', '90');
 
       this.clientResources.set(client.name, {
         user,
