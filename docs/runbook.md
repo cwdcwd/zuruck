@@ -162,15 +162,28 @@ aws s3api list-objects-v2 \
 
 **Trigger**: Lambda freshness checker reports `SSMParameterAccessible = 0`
 
+The freshness checker calls `GetParameter` with `WithDecryption: false` —
+existence-only check, no KMS involved. So a 0 means the parameter doesn't
+exist (deleted, renamed, never deployed) or the Lambda's `ssm:GetParameter`
+permission was revoked.
+
 **Response**:
-1. Verify the KMS key is not disabled or scheduled for deletion:
+1. Verify the parameter still exists:
 
 ```bash
-aws kms describe-key --key-id <kms-key-id>
+aws ssm get-parameter --name "/zuruck/restic/<client>/master-password"
 ```
 
-2. Verify the Lambda execution role has `ssm:GetParameter` and `kms:Decrypt` permissions
-3. Check CloudWatch Logs for the Lambda function for detailed error messages
+2. If the parameter is missing, restore from the SSM parameter history:
+
+```bash
+aws ssm get-parameter-history --name "/zuruck/restic/<client>/master-password"
+```
+
+3. Verify the Lambda execution role still has `ssm:GetParameter` on
+   `arn:aws:ssm:*:*:parameter/zuruck/restic/*`.
+4. Check CloudWatch Logs for the Lambda function (sanitized log lines —
+   the cleartext password is never logged or returned).
 
 ### Freshness Checker Lambda Errors
 
@@ -192,7 +205,39 @@ This alarm distinguishes "stale backup data" from "the monitoring system itself 
 3. If the error is transient, the next scheduled run (1 hour) should self-heal
 4. If persistent, check the Lambda configuration and redeploy if necessary
 
+### Bucket Configuration Changed
+
+**Trigger**: `zuruck-bucket-config-changes` EventBridge rule — fires when
+CloudTrail records `DeleteBucket*`, `PutBucketPolicy`, `PutBucketAcl`,
+`PutBucketVersioning`, `PutBucketPublicAccessBlock`, `DeleteBucketEncryption`,
+or `PutObjectLockConfiguration` for the backup bucket.
+
+This is a **paging event in steady state** — none of these calls should
+ever happen except via `cdk deploy`.
+
+**Response**:
+1. Identify the caller:
+
+```bash
+aws cloudtrail lookup-events \
+  --lookup-attributes AttributeKey=EventName,AttributeValue=PutBucketPolicy \
+  --max-results 5
+```
+
+2. If the change wasn't authorized, immediately:
+   - Revoke the caller's IAM credentials
+   - Restore the previous bucket policy from CloudTrail history
+   - Verify versioning is still enabled and Object Lock retention is intact
+3. If the change was authorized (e.g., a planned `cdk deploy`), log the
+   change in your audit trail and silence the alarm.
+
 ## Key Rotation
+
+> **Cadence**: rotate IAM access keys every 90 days (tagged
+> `RotationCadenceDays=90` on each `zuruck/clients/*/access-key` secret).
+> Set a calendar reminder, or wire an AWS Config rule
+> `iam-user-unused-credentials-check` with `maxCredentialUsageAge: 90`.
+> (Security-review S10.)
 
 ### Rotate IAM Access Keys
 
@@ -259,6 +304,27 @@ aws ssm put-parameter \
   --key-id <kms-key-id> \
   --overwrite
 ```
+
+> **Note**: SSM Parameter Store has no native rotation hook. If your
+> compliance posture requires automatic master-password rotation, migrate
+> the parameter to Secrets Manager (which has native rotation Lambdas)
+> and update [backup-secrets.ts](../lib/constructs/backup-secrets.ts) and
+> the client IAM policy accordingly. The cost delta is ~$0.40/secret/month.
+> (Security-review S11.)
+
+## Alerting Channels
+
+Email is the only subscription wired up by default. For a backup system,
+that's a single point of failure (mailbox full, employee turnover, holiday).
+Add at least one of:
+
+- **PagerDuty**: subscribe their HTTPS endpoint to the SNS topic
+- **Slack**: subscribe a Lambda that posts to a Slack webhook
+- **SMS**: SNS supports SMS subscriptions directly (region-dependent)
+
+The SNS topic refuses non-TLS subscriptions and publishes by policy, so
+subscriptions added later inherit the same in-transit guarantee.
+(Security-review S15.)
 
 ## Cost Management
 

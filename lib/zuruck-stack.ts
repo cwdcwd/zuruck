@@ -12,6 +12,19 @@ export interface ZuruckStackProps extends cdk.StackProps {
    * Email addresses to subscribe to backup alert notifications.
    */
   readonly alertEmails?: string[];
+
+  /**
+   * IAM role ARNs allowed to administer the KMS CMK. When unset, falls back
+   * to the account root principal. (Security-review S3.)
+   */
+  readonly kmsAdminRoleArns?: string[];
+
+  /**
+   * Object Lock default retention in days. 0 disables Object Lock.
+   * (Security-review S2.) Object Lock is only honored at bucket-creation
+   * time — pre-existing deployments need a manual recreation to enable it.
+   */
+  readonly objectLockRetentionDays?: number;
 }
 
 export class ZuruckStack extends cdk.Stack {
@@ -20,10 +33,12 @@ export class ZuruckStack extends cdk.Stack {
 
     const kms = new BackupKms(this, 'Kms', {
       description: 'Restic S3 backup encryption key',
+      adminRoleArns: props?.kmsAdminRoleArns,
     });
 
     const bucket = new BackupBucket(this, 'Bucket', {
       encryptionKey: kms.key,
+      objectLockRetentionDays: props?.objectLockRetentionDays,
     });
 
     const iam = new BackupIam(this, 'Iam', {
@@ -60,10 +75,6 @@ export class ZuruckStack extends cdk.Stack {
       description: 'SNS topic ARN for backup alerts',
     });
 
-    // Per-client: emit only the AccessKeyId (non-sensitive) and the
-    // Secrets-Manager ARN of the secret access key. Operators retrieve the
-    // secret value via `aws secretsmanager get-secret-value`, which has its
-    // own ACL surface and audit trail.
     for (const [name, resources] of iam.clientResources) {
       new cdk.CfnOutput(this, `AccessKeyId-${name}`, {
         value: resources.credentialsSecret.secretArn,
