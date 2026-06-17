@@ -123,26 +123,26 @@ info "Using restic: ${RESTIC_VERSION} (${RESTIC_BIN})"
 
 # ── Create configuration directory ──────────────────────────────────────
 info "Creating /etc/restic directory..."
-mkdir -p /etc/restic
+sudo mkdir -p /etc/restic
 
 # ── Generate client password ────────────────────────────────────────────
 info "Generating client password..."
 CLIENT_PASSWORD=$(openssl rand -base64 32)
-echo "${CLIENT_PASSWORD}" > /etc/restic/password
-chmod 600 /etc/restic/password
-chown root:root /etc/restic/password 2>/dev/null || chown root:wheel /etc/restic/password
+echo "${CLIENT_PASSWORD}" | sudo tee /etc/restic/password >/dev/null
+sudo chmod 600 /etc/restic/password
+sudo chown root:root /etc/restic/password 2>/dev/null || sudo chown root:wheel /etc/restic/password
 info "Client password saved to /etc/restic/password"
 
 # ── Create environment file ─────────────────────────────────────────────
 info "Creating /etc/restic/env..."
-cat > /etc/restic/env <<EOF
+cat <<EOF | sudo tee /etc/restic/env >/dev/null
 export AWS_ACCESS_KEY_ID="${ACCESS_KEY_ID}"
 export AWS_SECRET_ACCESS_KEY="${SECRET_ACCESS_KEY}"
 export RESTIC_REPOSITORY="s3:s3.${REGION}.amazonaws.com/${BUCKET_NAME}/${CLIENT_NAME}"
 export RESTIC_PASSWORD_FILE="/etc/restic/password"
 EOF
-chmod 600 /etc/restic/env
-chown root:root /etc/restic/env 2>/dev/null || chown root:wheel /etc/restic/env
+sudo chmod 600 /etc/restic/env
+sudo chown root:root /etc/restic/env 2>/dev/null || sudo chown root:wheel /etc/restic/env
 info "Environment file saved to /etc/restic/env"
 
 # ── Test connectivity ──────────────────────────────────────────────────
@@ -199,7 +199,7 @@ if [[ "$(uname)" == "Linux" ]] && command -v systemctl &>/dev/null; then
   printf -v BACKUP_PATHS_QUOTED ' "%s"' "${BACKUP_PATHS[@]}"
 
   info "Creating systemd service and timer..."
-  cat > /etc/systemd/system/restic-backup.service <<EOF
+  cat <<EOF | sudo tee /etc/systemd/system/restic-backup.service >/dev/null
 [Unit]
 Description=Restic Backup for ${CLIENT_NAME}
 After=network-online.target
@@ -211,7 +211,7 @@ ExecStartPre=${RESTIC_BIN} backup${BACKUP_PATHS_QUOTED} --tag auto
 ExecStart=${RESTIC_BIN} forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-yearly 2 --prune
 EOF
 
-  cat > /etc/systemd/system/restic-backup.timer <<EOF
+  cat <<EOF | sudo tee /etc/systemd/system/restic-backup.timer >/dev/null
 [Unit]
 Description=Restic Backup Timer for ${CLIENT_NAME}
 
