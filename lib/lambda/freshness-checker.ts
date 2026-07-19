@@ -29,7 +29,7 @@ const CLIENT_NAME_PATTERN = /^[a-z][a-z0-9-]{1,32}$/;
  *
  * (Security-review finding I4.)
  */
-function parseClients(raw: string | undefined): ClientConfig[] {
+export function parseClients(raw: string | undefined): ClientConfig[] {
   if (!raw) {
     throw new Error('CLIENTS env var is missing');
   }
@@ -71,7 +71,7 @@ function parseClients(raw: string | undefined): ClientConfig[] {
  * future logging diff that started serializing it would leak the master
  * password. (Security-review S4.)
  */
-function safeError(err: unknown): { name: string; message: string; code?: string } {
+export function safeError(err: unknown): { name: string; message: string; code?: string } {
   if (err instanceof Error) {
     const codeful = err as Error & { name?: string; $metadata?: { httpStatusCode?: number } };
     return {
@@ -95,6 +95,12 @@ export const handler = async (): Promise<void> => {
   const metricData: MetricDatum[] = [];
   const stamp = new Date();
   const dimsFor = (clientName: string) => [{ Name: 'Client', Value: clientName }];
+
+  // Collect per-client failures instead of aborting the whole run. A single
+  // client's S3 error must not blind every other client's metrics for the
+  // cycle. We publish everything we gathered, then re-raise at the end so the
+  // Lambda-error alarm still fires on systemic problems. (Review finding #5.)
+  const failedClients: string[] = [];
 
   for (const client of clients) {
     if (Date.now() > deadline) {
@@ -135,9 +141,30 @@ export const handler = async (): Promise<void> => {
         continuationToken = response.NextContinuationToken;
       } while (continuationToken);
     } catch (err) {
+      // Record the failure, emit a signal for this client, and move on to the
+      // next one. We deliberately do NOT publish a BackupFreshness metric for a
+      // client we couldn't check — leaving it absent lets treatMissingData=
+      // BREACHING page for that client specifically, while the others still get
+      // accurate metrics.
       console.error(`S3 list failed for ${client.name}:`, safeError(err));
-      throw err;
+      failedClients.push(client.name);
+      metricData.push({
+        MetricName: 'BackupCheckFailed',
+        Dimensions: dimsFor(client.name),
+        Value: 1,
+        Unit: 'None',
+        Timestamp: stamp,
+      });
+      continue;
     }
+
+    metricData.push({
+      MetricName: 'BackupCheckFailed',
+      Dimensions: dimsFor(client.name),
+      Value: 0,
+      Unit: 'None',
+      Timestamp: stamp,
+    });
 
     const backupsExist = objectCount > 0;
     metricData.push({
@@ -224,4 +251,13 @@ export const handler = async (): Promise<void> => {
   }
 
   console.log(`Published ${metricData.length} metric data points`);
+
+  // Re-raise after metrics are safely published so the Lambda-error alarm
+  // still fires on a systemic S3 problem — but only once every healthy
+  // client's data is in CloudWatch. (Review finding #5.)
+  if (failedClients.length > 0) {
+    throw new Error(
+      `Freshness check failed for ${failedClients.length} client(s): ${failedClients.join(', ')}`,
+    );
+  }
 };

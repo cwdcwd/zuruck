@@ -69,6 +69,16 @@ if (!Number.isFinite(objectLockRetentionDays) || objectLockRetentionDays < 0) {
   );
 }
 
+// Audit trail: on by default so the bucket-config-change alarm has a live
+// CloudTrail source. Disable with `-c enableAuditTrail=false` if an org-wide
+// trail already covers this account+region. (Review finding #4.)
+const enableAuditTrail =
+  String(app.node.tryGetContext('enableAuditTrail') ?? 'true').toLowerCase() !== 'false';
+
+// Optional: also capture S3 object-level data events (billed per event).
+const auditS3DataEvents =
+  String(app.node.tryGetContext('auditS3DataEvents') ?? 'false').toLowerCase() === 'true';
+
 new ZuruckStack(app, 'ZuruckStack', {
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
@@ -78,6 +88,8 @@ new ZuruckStack(app, 'ZuruckStack', {
   alertEmails,
   kmsAdminRoleArns,
   objectLockRetentionDays,
+  enableAuditTrail,
+  auditS3DataEvents,
   tags: {
     Project: 'zuruck',
     Purpose: 'restic-backup',

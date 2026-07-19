@@ -22,8 +22,16 @@ export interface BackupKmsProps {
  * for backup clients. The key policy is locked down so that:
  *  - Only named admin roles (or the account root, in fallback mode) can
  *    administer the key.
- *  - `ScheduleKeyDeletion` and `DisableKey` are explicitly denied to every
- *    principal that isn't an admin role — losing the key strands every backup.
+ *  - When scoped admin roles are supplied (`adminRoleArns`), `ScheduleKeyDeletion`
+ *    and `DisableKey` are explicitly denied to every principal that isn't one of
+ *    those roles — losing the key strands every backup. In the default
+ *    (account-root) mode no such Deny is added; the account root retains full
+ *    `kms:*`.
+ *  - `PutKeyPolicy` is likewise denied to non-admins, BUT the account root is
+ *    always exempted from that particular Deny. Freezing the key policy against
+ *    every principal (including root) would make it permanently unrepairable if
+ *    the admin roles were ever deleted or renamed — a classic KMS lockout. Root
+ *    keeps PutKeyPolicy as break-glass.
  *  - Pending-deletion window is the maximum (30 days) so an accidental
  *    `ScheduleKeyDeletion` is recoverable.
  */
@@ -61,7 +69,14 @@ export class BackupKms extends Construct {
     // isn't a configured admin. Even if some other identity-based policy
     // grants kms:ScheduleKeyDeletion, the explicit Deny here wins.
     if (adminRoleArns.length > 0) {
+      const accountRootArn = `arn:aws:iam::${cdk.Aws.ACCOUNT_ID}:root`;
+
       policy.addStatements(
+        // Irreversible key-loss actions: denied to everyone but the scoped
+        // admin roles. Root is intentionally NOT exempted here — accidental
+        // `ScheduleKeyDeletion` by a broad admin is exactly what we're guarding
+        // against, and the 30-day pending window plus these roles are enough to
+        // recover.
         new iam.PolicyStatement({
           sid: 'DenyDestructiveActionsToNonAdmins',
           effect: iam.Effect.DENY,
@@ -69,11 +84,27 @@ export class BackupKms extends Construct {
           actions: [
             'kms:ScheduleKeyDeletion',
             'kms:DisableKey',
-            'kms:PutKeyPolicy',
           ],
           resources: ['*'],
           conditions: {
             StringNotEquals: { 'aws:PrincipalArn': adminRoleArns },
+          },
+        }),
+        // Policy mutation: denied to non-admins, but the account ROOT is always
+        // exempt. Denying PutKeyPolicy to every principal including root would
+        // permanently freeze this policy if the admin roles were ever deleted
+        // or renamed — an unrecoverable KMS lockout. Root keeps PutKeyPolicy as
+        // break-glass so the key is always governable. (Review finding #3.)
+        new iam.PolicyStatement({
+          sid: 'DenyKeyPolicyChangesToNonAdmins',
+          effect: iam.Effect.DENY,
+          principals: [new iam.AnyPrincipal()],
+          actions: ['kms:PutKeyPolicy'],
+          resources: ['*'],
+          conditions: {
+            StringNotEquals: {
+              'aws:PrincipalArn': [...adminRoleArns, accountRootArn],
+            },
           },
         }),
       );
