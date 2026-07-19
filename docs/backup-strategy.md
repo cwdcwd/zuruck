@@ -28,14 +28,19 @@ restic forget \
   --prune
 ```
 
-> **Important**: Always run `forget` with `--prune` to actually free space. Without `--prune`, restic only marks snapshots for deletion but doesn't remove the data.
+> **Important**: Run `forget` with `--prune` so restic repacks and drops
+> unreferenced data. Note that on this versioned bucket `--prune` does not
+> immediately free *S3* space — see [Object Lock](#object-lock) below for why
+> pruned data lingers as noncurrent versions until the lifecycle rule expires
+> it (~90 days).
 
 ## Object Lock
 
-For new deployments, set `-c objectLockRetentionDays=30` (or higher) when
-running `cdk deploy`. This enables S3 Object Lock in Governance mode with
-a default per-object retention. **It must be set at bucket creation** —
-existing deployments need a manual bucket recreation to enable it.
+Object Lock is **enabled by default** (30-day Governance retention) — a no-flag
+`cdk deploy` turns it on. Raise it with `-c objectLockRetentionDays=60`, or
+disable it entirely with `-c objectLockRetentionDays=0`. **It must be set at
+bucket creation** — Object Lock cannot be toggled on or off later without a
+manual bucket recreation, so decide before the first deploy.
 
 ### Why
 
@@ -47,21 +52,36 @@ cannot delete a current or noncurrent object version without the
 `s3:BypassGovernanceRetention` permission, which the CDK stack does not
 grant to anyone.
 
-### Trade-off: `restic forget --prune` will fail on locked objects
+### Trade-off: `prune` succeeds, but space is not reclaimed for ~90 days
 
-`restic prune` deletes pack files that no longer have a referencing snapshot.
-With Object Lock active, that delete fails with `403` until the object ages
-past the lock window. The accommodation is straightforward:
+This is a common misconception worth stating precisely. On this **versioned**
+bucket, the client credential is granted `s3:DeleteObject` but **not**
+`s3:DeleteObjectVersion` (intentional — see the IAM construct). When
+`restic prune` deletes an obsolete pack file, `DeleteObject` (with no version
+id) writes a **delete marker** and leaves the underlying version in place:
 
-- During the lock window: run `restic forget --keep-…` **without** `--prune`
-  — this rewrites the index but leaves the actual pack files in place.
-- Once objects age past the lock window: run `restic prune` to actually
-  reclaim space.
+- The call **succeeds** — it does *not* return `403`, even with Object Lock
+  active, because the locked version is never actually removed. restic sees
+  the object as gone and considers the prune complete.
+- The real data survives as a **noncurrent version** and is only removed when
+  the noncurrent-version-expiration lifecycle rule fires (90 days). Object
+  Lock (30 days by default) simply guarantees that early-expiry can't happen
+  inside the lock window; since the lock is shorter than the noncurrent
+  window, the two compose cleanly and lifecycle reclaims the space once both
+  have elapsed.
 
-A reasonable schedule is `forget` daily, `prune` monthly. If you set the
-lock retention longer than the GFS hold-window for the smallest bucket
-(e.g., daily snapshots kept 7 days vs. a 30-day lock), expect storage
-cost to grow until the first `prune` runs.
+**Operational consequence — plan for it:** actual S3 storage is meaningfully
+larger than what `restic stats` reports, because every pruned pack lingers as
+a noncurrent version for up to the 90-day retention window. This is the
+deliberate price of surviving a client compromise. Budget storage for the
+full noncurrent-retention window, not just the live snapshot size. Lowering
+`noncurrentVersionRetentionDays` reduces cost but shortens your
+recover-from-compromise window; don't set it below your incident-detection
+time.
+
+A reasonable schedule is `forget` daily and `prune` weekly/monthly — but note
+that `prune`'s frequency changes *when* delete markers are written, not *when*
+storage is freed, which is governed entirely by the lifecycle rule above.
 
 ### Effect on Glacier transitions
 

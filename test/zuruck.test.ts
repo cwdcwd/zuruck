@@ -297,6 +297,31 @@ describe('ZuruckStack', () => {
     });
   });
 
+  test('a CloudTrail trail is provisioned by default so the bucket-config rule has a source (#4)', () => {
+    synth().resourceCountIs('AWS::CloudTrail::Trail', 1);
+  });
+
+  test('audit trail can be disabled for accounts with an org-wide trail (#4)', () => {
+    const app = new cdk.App();
+    const stack = new ZuruckStack(app, 'TestStack', { enableAuditTrail: false });
+    Template.fromStack(stack).resourceCountIs('AWS::CloudTrail::Trail', 0);
+  });
+
+  test('KMS policy exempts the account root from the PutKeyPolicy deny (break-glass, #3)', () => {
+    const app = new cdk.App();
+    const stack = new ZuruckStack(app, 'TestStack', {
+      kmsAdminRoleArns: ['arn:aws:iam::111111111111:role/ZuruckAdmin'],
+    });
+    const keys = Template.fromStack(stack).findResources('AWS::KMS::Key');
+    const policyJson = JSON.stringify(keys);
+    // The dedicated PutKeyPolicy deny exists...
+    expect(policyJson).toContain('DenyKeyPolicyChangesToNonAdmins');
+    // ...and the destructive-action deny no longer bundles PutKeyPolicy with
+    // ScheduleKeyDeletion (which has no root exemption).
+    const destructive = policyJson.match(/DenyDestructiveActionsToNonAdmins[\s\S]*?DenyKeyPolicyChangesToNonAdmins/);
+    expect(destructive).not.toBeNull();
+  });
+
   test('provisioner Lambda has reservedConcurrentExecutions=1 (S5)', () => {
     const template = synth();
     const fns = template.findResources('AWS::Lambda::Function');

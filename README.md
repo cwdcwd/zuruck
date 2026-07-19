@@ -79,16 +79,22 @@ npx cdk bootstrap aws://<ACCOUNT_ID>/us-west-2
 # Deploy with alert emails
 npx cdk deploy -c alertEmails=you@example.com,team@example.com
 
-# Recommended for new deployments — enable S3 Object Lock and scope
-# the KMS admin principal to a named role.
+# Recommended for new deployments — scope the KMS admin principal to a
+# named role. (S3 Object Lock is already ON by default; see the flag table.)
 npx cdk deploy \
   -c alertEmails=you@example.com \
-  -c objectLockRetentionDays=30 \
   -c kmsAdminRoleArns=arn:aws:iam::<account>:role/<your-admin-role>
 
 # Or deploy without alerts
 npx cdk deploy
 ```
+
+> ⚠️ **Object Lock is enabled by default (30-day GOVERNANCE retention).** It is
+> irreversible at bucket creation — you cannot turn it off later without
+> recreating the bucket. Deploy with `-c objectLockRetentionDays=0` if you
+> explicitly do **not** want it. See the flag table and
+> [Backup Strategy](docs/backup-strategy.md#object-lock) for the storage-cost
+> implications.
 
 #### Deploy-time context flags
 
@@ -96,8 +102,10 @@ npx cdk deploy
 |---|---|---|
 | `alertEmails` | none | Comma-separated email addresses for the SNS alert topic |
 | `region` | `CDK_DEFAULT_REGION` or `us-west-2` | AWS region (warns on drift) |
-| `objectLockRetentionDays` | `0` (disabled) | S3 Object Lock default Governance retention. Must be set at bucket creation; cannot be enabled later without recreating the bucket. Recommended: `30`. With Object Lock active, `restic forget --prune` will fail on objects still inside the lock window — see [Backup Strategy](docs/backup-strategy.md#object-lock). |
-| `kmsAdminRoleArns` | account root | Comma-separated IAM role ARNs allowed to administer the KMS CMK. When set, every other principal — including account-admins — is explicitly denied `kms:ScheduleKeyDeletion`, `kms:DisableKey`, and `kms:PutKeyPolicy`. |
+| `objectLockRetentionDays` | `30` (enabled) | S3 Object Lock default Governance retention, in days. **On by default**; pass `0` to disable. Must be set at bucket creation — it cannot be enabled *or disabled* later without recreating the bucket. Because the bucket is versioned and clients lack `s3:DeleteObjectVersion`, `restic prune` still **succeeds** under Object Lock (it writes delete markers) — but pruned data lingers as noncurrent versions until the ~90-day lifecycle rule expires it, so plan storage accordingly. See [Backup Strategy](docs/backup-strategy.md#object-lock). |
+| `kmsAdminRoleArns` | account root | Comma-separated IAM role ARNs allowed to administer the KMS CMK. When set, every other principal — including account-admins — is denied `kms:ScheduleKeyDeletion` and `kms:DisableKey`. `kms:PutKeyPolicy` is also denied to non-admins, **except the account root**, which retains it as break-glass so the key policy can never become permanently unrepairable. |
+| `enableAuditTrail` | `true` | Provision a dedicated CloudTrail trail (management write events → a private, retained log bucket) so the bucket-config-change alarm has a live event source. Set `false` if an org-wide trail already covers this account+region. |
+| `auditS3DataEvents` | `false` | When the audit trail is enabled, also record S3 object-level (data) events for the backup bucket. Billed per event; useful for forensic queries, not alerting. |
 
 ### Add a New Client
 

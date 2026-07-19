@@ -5,6 +5,7 @@ import { BackupBucket } from './constructs/backup-bucket';
 import { BackupIam } from './constructs/backup-iam';
 import { BackupSecrets } from './constructs/backup-secrets';
 import { BackupMonitoring } from './constructs/backup-monitoring';
+import { BackupAudit } from './constructs/backup-audit';
 import { CLIENTS } from './config/clients';
 
 export interface ZuruckStackProps extends cdk.StackProps {
@@ -25,6 +26,23 @@ export interface ZuruckStackProps extends cdk.StackProps {
    * time — pre-existing deployments need a manual recreation to enable it.
    */
   readonly objectLockRetentionDays?: number;
+
+  /**
+   * Provision a CloudTrail trail so the bucket-config-change EventBridge rule
+   * has a live event source. Disable when the account already runs an
+   * org-wide trail. (Review finding #4.)
+   *
+   * @default true
+   */
+  readonly enableAuditTrail?: boolean;
+
+  /**
+   * When the audit trail is enabled, also capture S3 object-level (data)
+   * events for the backup bucket. Billed per event; off by default.
+   *
+   * @default false
+   */
+  readonly auditS3DataEvents?: boolean;
 }
 
 export class ZuruckStack extends cdk.Stack {
@@ -59,6 +77,15 @@ export class ZuruckStack extends cdk.Stack {
       clients: CLIENTS,
       alertEmails: props?.alertEmails,
     });
+
+    // CloudTrail trail feeding the bucket-config EventBridge rule. On by
+    // default; disable when an org-wide trail already delivers these events.
+    if (props?.enableAuditTrail !== false) {
+      new BackupAudit(this, 'Audit', {
+        bucket: bucket.bucket,
+        includeS3DataEvents: props?.auditS3DataEvents,
+      });
+    }
 
     new cdk.CfnOutput(this, 'BucketName', {
       value: bucket.bucket.bucketName,

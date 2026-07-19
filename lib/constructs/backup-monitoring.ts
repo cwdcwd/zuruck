@@ -240,9 +240,13 @@ export class BackupMonitoring extends Construct {
     // ── EventBridge: Mass-delete detection ────────────────────────────
     // Page on any CloudTrail S3 management event that touches our bucket
     // with `DeleteBucket*` or `PutBucketPolicy` (state-changing actions
-    // that should never happen in steady state). For object-level mass
-    // deletes (`DeleteObjects` in volumes), enable CloudTrail S3
-    // data-events on the bucket and route those to this same topic.
+    // that should never happen in steady state). This rule only fires if a
+    // CloudTrail trail is logging management events in this account+region —
+    // the BackupAudit construct provisions one by default. (Review finding #4.)
+    // For object-level mass deletes (`DeleteObjects` in volumes), enable
+    // CloudTrail S3 data-events (`-c auditS3DataEvents=true`); note that
+    // per-event alerting would page on every legitimate `restic prune`, so
+    // object-level detection is intentionally volume-based / out of scope here.
     // (Security-review S8.)
     const sensitiveBucketEventsRule = new events.Rule(this, 'SensitiveBucketEvents', {
       ruleName: 'zuruck-bucket-config-changes',

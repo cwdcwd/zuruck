@@ -25,7 +25,10 @@ error() { echo -e "${RED}[ERROR]${NC} $*" >&2; exit 1; }
 CLIENT_NAME=""
 BUCKET_NAME=""
 ACCESS_KEY_ID=""
-SECRET_ACCESS_KEY=""
+# Preserve a SECRET_ACCESS_KEY exported into the environment — do NOT blank an
+# inherited value, or the documented `export SECRET_ACCESS_KEY=...` workflow
+# silently falls through to the interactive prompt. (Review finding #2.)
+SECRET_ACCESS_KEY="${SECRET_ACCESS_KEY:-}"
 REGION="us-west-2"
 BACKUP_PATHS=()
 INSTALL_RESTIC=false
@@ -98,23 +101,22 @@ if [[ ! "$CLIENT_NAME" =~ ^[a-z][a-z0-9-]{1,32}$ ]]; then
   error "Invalid client name '$CLIENT_NAME': must match ^[a-z][a-z0-9-]{1,32}$"
 fi
 
-# Resolve secret access key: prefer env var > CLI arg > interactive prompt.
+# Resolve secret access key. Precedence: the SECRET_ACCESS_KEY env var (set at
+# the top from the inherited environment) or the --secret-access-key flag (which
+# overrides it during arg parsing), else an interactive prompt.
 # SECURITY: --secret-access-key on the command line is visible in ps(1) and
 # shell history. Prefer `export SECRET_ACCESS_KEY=...` before running this
 # script, or omit it entirely to be prompted securely.
 if [[ -z "$SECRET_ACCESS_KEY" ]]; then
-  if [[ -n "${SECRET_ACCESS_KEY_ENV:-}" ]]; then
-    SECRET_ACCESS_KEY="$SECRET_ACCESS_KEY_ENV"
-  else
-    warn "--secret-access-key not provided and SECRET_ACCESS_KEY env var not set."
-    warn "You will be prompted for the secret access key (input hidden)."
-    # Restore terminal echo on any exit path: an interrupted `read -rs` can
-    # otherwise leave the user with a broken terminal. (Security-review S13.)
-    trap 'stty echo 2>/dev/null || true' EXIT INT TERM
-    read -rs SECRET_ACCESS_KEY </dev/tty
-    trap - EXIT INT TERM
-    [[ -z "$SECRET_ACCESS_KEY" ]] && error "Secret access key is required."
-  fi
+  warn "--secret-access-key not provided and SECRET_ACCESS_KEY env var not set."
+  warn "You will be prompted for the secret access key (input hidden)."
+  # Restore terminal echo on any exit path: an interrupted `read -rs` can
+  # otherwise leave the user with a broken terminal. (Security-review S13.)
+  trap 'stty echo 2>/dev/null || true' EXIT INT TERM
+  read -rs SECRET_ACCESS_KEY </dev/tty
+  trap - EXIT INT TERM
+  echo
+  [[ -z "$SECRET_ACCESS_KEY" ]] && error "Secret access key is required."
 fi
 
 info "Setting up restic backup client: ${CLIENT_NAME}"

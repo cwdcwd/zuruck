@@ -271,6 +271,17 @@ aws cloudtrail lookup-events \
 > `iam-user-unused-credentials-check` with `maxCredentialUsageAge: 90`.
 > (Security-review S10.)
 
+> **Why rotation is manual (by design):** each client machine consumes its
+> credential from a static `/etc/restic/env` file, not from a live
+> Secrets Manager fetch. A Secrets Manager rotation Lambda would rotate the
+> IAM key and the stored secret but could not push the new value to the
+> client, so the very next backup would fail with `InvalidAccessKeyId`.
+> Closing this loop safely requires client-side pull (e.g. an agent that
+> re-reads the secret before each run) — a deliberate future enhancement, not
+> a gap to paper over with server-side auto-rotation. Until then, rotation is
+> the two-key overlap procedure below, which never leaves a client without a
+> working credential.
+
 ### Rotate IAM Access Keys
 
 The CDK-managed access key is replaced on the next deploy if you delete it
