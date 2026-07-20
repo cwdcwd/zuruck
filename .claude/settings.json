@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(restic version *)",
+      "Bash(restic help *)",
+      "Bash(command -v jq)"
+    ]
+  }
+}
