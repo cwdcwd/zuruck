@@ -99,7 +99,19 @@ $DRY_RUN && ARGS+=(--dry-run --verbose)
 echo "==> Repository: $RESTIC_REPOSITORY"
 echo "==> Excludes:   ${EXCLUDE_FILE:-<none>}"
 echo "==> Backing up: ${EXISTING[*]}"
+# restic exit codes: 0 = ok, 3 = snapshot created but some files were unreadable
+# (locked/deleted mid-scan, permissions). Treat 3 as a warning so retention still
+# runs and an unattended job isn't marked failed for a transient unreadable file.
+set +e
 restic "${ARGS[@]}"
+BACKUP_RC=$?
+set -e
+if [[ $BACKUP_RC -eq 3 ]]; then
+  echo "WARNING: restic reported unreadable source files (exit 3); snapshot was still created — continuing." >&2
+elif [[ $BACKUP_RC -ne 0 ]]; then
+  echo "ERROR: restic backup failed (exit $BACKUP_RC)." >&2
+  exit "$BACKUP_RC"
+fi
 
 # ── Optional retention ────────────────────────────────────────────────────
 # NOTE: on this bucket (versioning + Object Lock) --prune writes delete markers
