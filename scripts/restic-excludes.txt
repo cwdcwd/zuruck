@@ -1,0 +1,46 @@
+# Zuruck — restic exclude patterns
+#
+# Regenerable build output, dependency dirs, and OS metadata that appear
+# *inside* backed-up folders (e.g. source projects under ~/Desktop). Safe to
+# skip — they're reproducible and just add churn and cost.
+#
+# Used automatically by scripts/backup.sh. To customize on a client, copy this
+# file to /etc/restic/excludes and edit it there (backup.sh prefers that copy).
+#
+# Pattern notes:
+#   **/name   matches a dir/file named `name` at ANY depth
+# These are intentionally scoped to build/cache artifacts, NOT top-level SDK
+# dirs (~/flutter, ~/.ollama, etc.) — those are simply left out of the backup
+# set instead, so we never risk excluding a real project folder by name.
+
+# ── macOS metadata ─────────────────────────────────────────────
+**/.DS_Store
+**/.localized
+**/.Spotlight-V100
+**/.fseventsd
+
+# ── Dependency / virtualenv dirs (reinstallable) ───────────────
+**/node_modules
+**/.venv
+**/venv
+**/.tox
+**/__pycache__
+**/.mypy_cache
+**/.pytest_cache
+**/.ruff_cache
+
+# ── Build output ───────────────────────────────────────────────
+**/target        # Rust / Maven
+**/DerivedData   # Xcode
+**/.next
+**/.nuxt
+**/.turbo
+**/.parcel-cache
+**/.gradle
+**/.dart_tool
+**/.terraform
+
+# ── Generic caches ─────────────────────────────────────────────
+**/.cache
+**/Caches
+**/*.log.[0-9]*
