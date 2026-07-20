@@ -107,6 +107,46 @@ aws s3 rm s3://zuruck-backup-<account-id>-<region>/charlie/ --recursive
 aws ssm delete-parameter --name "/zuruck/restic/charlie/master-password"
 ```
 
+## Client Status (Local)
+
+Check backup health directly on the client — no AWS console needed. `scripts/status.sh`
+reads the same `/etc/restic/env` and reports the launchd schedule, whether a backup
+is running now, the newest snapshot's age vs the freshness threshold, repo size, and
+recent-snapshot history.
+
+```bash
+./scripts/status.sh                 # colored terminal summary
+./scripts/status.sh --json          # machine-readable (scriptable freshness checks)
+./scripts/status.sh --html --open   # self-contained HTML dashboard, opened in the browser
+./scripts/status.sh --threshold 12  # override the freshness window (hours)
+```
+
+The scheduled backup regenerates the HTML dashboard after every run at
+`~/Library/Logs/zuruck-status.html`, so it always reflects the latest state.
+
+This is complementary to the cloud-side monitoring (CloudWatch dashboard
+`zuruck-backup-health`, SNS email alerts, and the hourly freshness-checker Lambda) —
+see [Monitoring Response](#monitoring-response) below.
+
+## Recovery Quickstart
+
+`scripts/restore.sh` wraps restic restore with the same client env and a few
+safety rails (it never restores in place; it targets a fresh directory).
+
+```bash
+./scripts/restore.sh list                                   # find the snapshot id
+./scripts/restore.sh browse latest /Users/cwd/Documents     # list files in a snapshot
+./scripts/restore.sh dump  latest /Users/cwd/.gitconfig --out ./gitconfig.recovered   # one file
+./scripts/restore.sh restore latest --target ~/zuruck-restore                          # full
+./scripts/restore.sh restore <id>  --target ~/zuruck-restore --include /Users/cwd/Documents  # selective
+./scripts/restore.sh mount ~/zuruck-mount                   # browse the repo as a filesystem (needs macFUSE)
+./scripts/restore.sh stage                                  # pre-restore Glacier/Deep Archive objects
+```
+
+If a restore reports objects it cannot read, they've tiered to Glacier/Deep
+Archive — run `restore.sh stage` first (see [Restoring from Glacier](./backup-strategy.md#restoring-from-glacier)),
+wait for retrieval, then restore. The detailed manual procedures follow.
+
 ## Emergency Restore
 
 ### Restore to a New Machine
@@ -152,6 +192,41 @@ restic ls <snapshot-id>
 # or pass the path directly (no flag) to restrict the restore.
 restic restore <snapshot-id> --target /data --include /path/to/file
 ```
+
+### Recover a Snapshot Lost to `forget`/`prune` (S3 Version History)
+
+Clients have `s3:DeleteObject` but **not** `s3:DeleteObjectVersion`, and the bucket
+keeps noncurrent versions for ~90 days. So a `restic forget --prune` (or a
+compromised client key) only writes **delete markers** — the real repository objects
+survive as noncurrent versions and can be brought back within that window.
+
+This needs an **operator** session (root/admin), not the client's scoped key. The
+mechanism is to remove the delete markers so the prior versions become current again:
+
+```bash
+export AWS_STS_REGIONAL_ENDPOINTS=legacy      # if regional STS is DNS-blocked
+B=zuruck-backup-<account>-<region>
+CLIENT=<client-name>
+PROFILE=<operator-profile>
+
+# 1. Find delete markers under the client prefix (these mask the live data).
+aws s3api list-object-versions --bucket "$B" --prefix "$CLIENT/" \
+  --profile "$PROFILE" --query 'DeleteMarkers[?IsLatest==`true`].[Key,VersionId]' \
+  --output text > /tmp/markers.txt
+
+# 2. Remove each delete marker → the previous version becomes current again.
+while read -r key vid; do
+  [ -z "$key" ] && continue
+  aws s3api delete-object --bucket "$B" --key "$key" --version-id "$vid" --profile "$PROFILE"
+done < /tmp/markers.txt
+
+# 3. The repository is whole again; verify from the client.
+source /etc/restic/env
+restic snapshots
+```
+
+> Object Lock never blocks reads, so the data was always retrievable via version
+> history — this step just makes it the current version again so restic sees it.
 
 ## Wipe & Re-initialize a Client Repository
 

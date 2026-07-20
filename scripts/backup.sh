@@ -127,3 +127,8 @@ fi
 
 echo "==> Done. Snapshots:"
 restic snapshots --latest 5 2>/dev/null || true
+
+# Refresh the local status dashboard (best-effort; never fail the backup over it).
+if [[ -x "$SCRIPT_DIR/status.sh" ]]; then
+  "$SCRIPT_DIR/status.sh" --html >/dev/null 2>&1 || true
+fi
