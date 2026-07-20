@@ -153,6 +153,59 @@ restic ls <snapshot-id>
 restic restore <snapshot-id> --target /data --include /path/to/file
 ```
 
+## Wipe & Re-initialize a Client Repository
+
+Use this when a client's repository must be started from scratch — e.g. the
+repository password is lost (no client *or* master key opens it), the repo was
+created outside the managed flow, or the data is disposable and you want a
+clean slate tied to the SSM master password.
+
+> ⚠️ **Irreversible.** This permanently deletes every object *and every S3
+> version* under the client's prefix. restic repositories are encrypted with no
+> backdoor — if you're wiping because the password is lost, the existing data is
+> gone regardless. Never run this if you still need the data and might recover a
+> password.
+
+Requires an **operator** session (root or an admin identity), not the client's
+scoped key — the client key intentionally lacks `s3:DeleteObjectVersion`.
+
+```bash
+export AWS_STS_REGIONAL_ENDPOINTS=legacy      # if regional STS is DNS-blocked
+B=zuruck-backup-<account>-<region>
+CLIENT=<client-name>
+PROFILE=<operator-profile>
+
+# 1. PREVIEW everything under the prefix (versions + delete markers).
+aws s3api list-object-versions --bucket "$B" --prefix "$CLIENT/" \
+  --profile "$PROFILE" --output json > /tmp/wipe.json
+python3 -c 'import json;d=json.load(open("/tmp/wipe.json"));v=d.get("Versions")or[];m=d.get("DeleteMarkers")or[];print("versions",len(v),"markers",len(m),"bytes",sum(x.get("Size",0)for x in v))'
+
+# 2. DELETE all versions + markers (scoped strictly to the prefix).
+python3 -c 'import json;d=json.load(open("/tmp/wipe.json"));o=[{"Key":x["Key"],"VersionId":x["VersionId"]}for x in (d.get("Versions")or[])+(d.get("DeleteMarkers")or[])];assert all(k["Key"].startswith(f"'"$CLIENT"'/")for k in o);json.dump({"Objects":o},open("/tmp/wipe-del.json","w"))'
+aws s3api delete-objects --bucket "$B" --delete file:///tmp/wipe-del.json \
+  --bypass-governance-retention --profile "$PROFILE"
+
+# 3. VERIFY the prefix is empty.
+aws s3 ls "s3://$B/$CLIENT/" --recursive --profile "$PROFILE"   # expect no output
+```
+
+Then re-initialize on the **client machine** (repo created with the master key,
+day-to-day access via the client password):
+
+```bash
+M="$(aws ssm get-parameter --name /zuruck/restic/$CLIENT/master-password \
+  --with-decryption --profile "$PROFILE" --region <region> --query Parameter.Value --output text)"
+source /etc/restic/env
+unset RESTIC_PASSWORD_FILE
+RESTIC_PASSWORD="$M" restic init
+RESTIC_PASSWORD="$M" restic key add --new-password-file /etc/restic/password
+unset M RESTIC_PASSWORD
+
+source /etc/restic/env
+restic snapshots                 # opens with the client password → healthy repo
+./scripts/backup.sh              # first real backup
+```
+
 ## Monitoring Response
 
 ### Stale Backup Alarm
