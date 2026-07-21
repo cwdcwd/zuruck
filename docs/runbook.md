@@ -423,6 +423,13 @@ Never `restic unlock` while a backup you care about is genuinely running on
 another machine — on the same host a dead PID's lock is detected as stale and
 removed automatically.
 
+On **Windows** the same self-heal applies (`scripts/win/backup.ps1` runs
+`restic unlock` at the start). Check the task with
+`.\install-task.ps1 -Status`: `LastTaskResult` `0` = success, `267009` =
+running, `267011` = never run. VSS requires the task to run elevated (it runs as
+SYSTEM); a non-elevated manual `backup.ps1` skips locked files with a warning.
+See the [Windows Client Setup Guide](./windows-setup-guide.md).
+
 ## Key Rotation
 
 > **Cadence**: rotate IAM access keys every 90 days (tagged
