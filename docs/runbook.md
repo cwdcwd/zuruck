@@ -391,6 +391,38 @@ aws cloudtrail lookup-events \
 3. If the change was authorized (e.g., a planned `cdk deploy`), log the
    change in your audit trail and silence the alarm.
 
+### Backup Job Fails to Lock (`last exit 11` / "repository is already locked")
+
+**Symptom**: `./scripts/install-schedule.sh --status` (or `status.sh`) shows a
+non-zero `last exit` (commonly **11**), and the log contains:
+
+```
+unable to create lock in backend: repository is already locked by PID <n> ...
+the `unlock` command can be used to remove stale locks
+```
+
+**Cause**: a previous run was hard-killed (the Mac slept mid-backup, or a job was
+force-stopped) and left a lock behind. `restic backup` takes a *non-exclusive*
+lock so backups still succeed and coexist with the stale one — but `forget
+--prune` needs an *exclusive* lock, fails to acquire it, and exits 11. Result:
+snapshots keep saving, but retention/prune silently stops running.
+
+**Response**: this is now **self-healing** — `backup.sh` runs `restic unlock`
+at the start of every run (which removes only *stale* locks; a live backup's
+lock is untouched) and treats a prune failure as a non-fatal warning. If you need
+to clear it manually:
+
+```bash
+source /etc/restic/env
+restic list locks        # inspect
+restic unlock            # remove stale locks (safe; leaves live ones)
+./scripts/backup.sh      # confirm exit 0 and that retention runs
+```
+
+Never `restic unlock` while a backup you care about is genuinely running on
+another machine — on the same host a dead PID's lock is detected as stale and
+removed automatically.
+
 ## Key Rotation
 
 > **Cadence**: rotate IAM access keys every 90 days (tagged
