@@ -164,8 +164,14 @@ zuruck/
 │   └── lambda/
 │       ├── freshness-checker.ts          # Hourly per-client backup freshness check
 │       └── master-password-provisioner.ts # Custom-resource handler that idempotently provisions SSM master passwords at deploy time
-├── scripts/
-│   └── client-setup.sh              # Client onboarding script
+├── scripts/                        # Client-side tooling (macOS/Linux)
+│   ├── client-setup.sh             # Client onboarding (env, password, repo init)
+│   ├── backup.sh                   # restic backup wrapper (paths, excludes, retention)
+│   ├── install-schedule.sh         # macOS launchd scheduler installer
+│   ├── zuruck-runner.c             # dedicated FDA wrapper the schedule runs through
+│   ├── status.sh                   # local status: terminal / JSON / HTML dashboard
+│   ├── restore.sh                  # guided recovery (list/browse/dump/restore/mount/stage)
+│   └── restic-excludes.txt         # default exclude patterns
 ├── docs/
 │   ├── plans/backup-system-plan.md  # Architecture plan
 │   ├── backup-strategy.md           # Retention + cold storage strategy
@@ -204,6 +210,16 @@ zuruck/
 | `npx cdk diff` | Compare deployed stack with current state |
 | `npx cdk deploy` | Deploy stack to AWS |
 | `npx cdk destroy` | Tear down the stack |
+
+### On a client machine
+
+| Command | Description |
+|---|---|
+| `./scripts/backup.sh --forget` | Run a backup + apply retention/prune |
+| `./scripts/install-schedule.sh` | Install the launchd schedule (see [FDA note](docs/client-setup-guide.md#option-c-macos-launchd-use-scriptsinstall-schedulesh)) |
+| `./scripts/install-schedule.sh --status` | Is the schedule loaded / when did it last run |
+| `./scripts/status.sh` | Local backup health (add `--html --open` for the dashboard) |
+| `./scripts/restore.sh list` | List snapshots (then `restore` / `dump` / `browse` — see [runbook](docs/runbook.md#recovery-quickstart)) |
 
 ## Documentation
 

@@ -184,13 +184,44 @@ Add:
 5 */4 * * * . /etc/restic/env && restic backup /data --tag auto && restic forget --keep-daily 7 --keep-weekly 4 --keep-monthly 6 --keep-yearly 2 --prune >> /var/log/restic.log 2>&1
 ```
 
-### Option C: macOS launchd
+### Option C: macOS launchd (use `scripts/install-schedule.sh`)
+
+Don't hand-write the plist — `scripts/install-schedule.sh` builds and loads a
+per-user LaunchAgent (`com.zuruck.backup`) that runs `backup.sh` on a fixed
+daily schedule (`StartCalendarInterval`, default every 4h: 00/04/08/12/16/20).
 
 ```bash
-# Create ~/Library/LaunchAgents/com.restic.backup.plist
+./scripts/install-schedule.sh                # install, default every 4h
+./scripts/install-schedule.sh --every 6      # every 6 hours
+./scripts/install-schedule.sh --status       # is it loaded? built? last exit?
+./scripts/install-schedule.sh --uninstall    # remove it
 ```
 
-See the [restic documentation](https://restic.readthedocs.io/en/stable/080_examples.html) for macOS-specific scheduling.
+**Full Disk Access (required, one-time).** A background launchd job cannot read
+protected folders (Desktop/Documents/Downloads/Pictures/Photos) without FDA, and
+it gets *no* prompt — it silently skips them. To avoid granting FDA to
+system-wide `/bin/bash`, the schedule runs through a dedicated compiled wrapper
+(`scripts/zuruck-runner.c` → `~/Library/Application Support/Zuruck/zuruck-runner`).
+Grant FDA to **that binary only**:
+
+> System Settings › Privacy & Security › Full Disk Access › **+** , press **⌘⇧G**,
+> paste the path printed by the installer, enable the toggle. No need to grant
+> `/bin/bash`.
+
+Because macOS attributes file access to the launchd job's *responsible process*
+(the wrapper, which stays resident via `fork()`+`exec()`), that single grant
+covers the whole `runner → bash → restic` chain. Rebuilding the wrapper changes
+its code hash and invalidates the grant, so a normal install never recompiles an
+existing binary — only `./scripts/install-schedule.sh --build-runner` does, after
+which you re-grant FDA.
+
+> **Laptops sleep.** launchd does not fire a scheduled job while the Mac is
+> asleep; it runs a single catch-up on the next wake. With a 24h freshness
+> threshold this is fine, but if you need guaranteed overnight backups, wake the
+> Mac with `sudo pmset repeat wakeorpoweron MTWRFSU 23:55:00`.
+
+Check health anytime with `./scripts/status.sh` (see the runbook's
+[Client Status](./runbook.md#client-status-local) section).
 
 ## Step 7: Verify Monitoring
 

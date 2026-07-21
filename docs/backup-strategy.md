@@ -161,6 +161,10 @@ done
 | Database servers | Every 2 hours | Daily (after midnight backup) |
 | Workstations | Daily (on login) | Weekly (Sunday) |
 
+On **macOS**, don't hand-roll the schedule — use `scripts/install-schedule.sh`,
+which installs a launchd LaunchAgent running through a Full Disk Access wrapper.
+See [Client Setup Guide → Option C](./client-setup-guide.md#option-c-macos-launchd-use-scriptsinstall-schedulesh).
+
 ### Systemd Timer Example
 
 Replace `RESTIC_BIN` below with the absolute path from `command -v restic`
