@@ -82,9 +82,14 @@ if PRINT="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null)"; then
   SCHED_PID="$(printf '%s\n' "$PRINT" | awk -F'= ' '/^[[:space:]]*pid =/{print $2; exit}')"
   SCHED_LAST_EXIT="$(printf '%s\n' "$PRINT" | awk -F'= ' '/last exit code =/{print $2; exit}')"
 fi
+SCHED_TIMES=""
 if [[ -f "$PLIST" ]]; then
   secs="$(plutil -extract StartInterval raw "$PLIST" 2>/dev/null || echo "")"
   [[ "$secs" =~ ^[0-9]+$ ]] && EVERY_HOURS="$(( secs / 3600 ))"
+  cal="$(plutil -extract StartCalendarInterval json -o - "$PLIST" 2>/dev/null || echo "")"
+  if [[ -n "$cal" ]]; then
+    SCHED_TIMES="$(printf '%s' "$cal" | jq -r '[.[] | ((.Hour // 0)|tostring|if length<2 then "0"+. else . end) + ":" + ((.Minute // 0)|tostring|if length<2 then "0"+. else . end)] | join(" ")' 2>/dev/null || echo "")"
+  fi
 fi
 
 # ── Live run? ──────────────────────────────────────────────────────────────
@@ -122,7 +127,7 @@ elif [[ -n "$LATEST_AGE_SECS" ]] && (( LATEST_AGE_SECS <= THRESHOLD_HOURS * 3600
 else VERDICT="stale"; fi
 
 # ── JSON output ────────────────────────────────────────────────────────────
-nn() { [[ -n "${1:-}" ]] && printf '%s' "$1" || printf 'null'; }  # numeric-or-null for --argjson
+nn() { [[ "${1:-}" =~ ^-?[0-9]+$ ]] && printf '%s' "$1" || printf 'null'; }  # integer-or-null for --argjson
 build_json() {
   printf '%s' "$SNAP_JSON" | jq \
     --arg generated "$GENERATED" \
@@ -135,6 +140,7 @@ build_json() {
     --argjson schedpid "$(nn "${SCHED_PID:-}")" \
     --argjson lastexit "$(nn "${SCHED_LAST_EXIT:-}")" \
     --argjson every "$(nn "${EVERY_HOURS:-}")" \
+    --arg schedtimes "${SCHED_TIMES:-}" \
     --arg latestid "${LATEST_ID:-}" \
     --arg latestiso "${LATEST_ISO:-}" \
     --argjson lateage "$(nn "${LATEST_AGE_SECS:-}")" \
@@ -145,7 +151,9 @@ build_json() {
       repository: $repo,
       verdict: $verdict,
       threshold_hours: $threshold,
-      schedule: { loaded: ($loaded=="yes"), every_hours: $every, pid: $schedpid, last_exit_code: $lastexit },
+      schedule: { loaded: ($loaded=="yes"), every_hours: $every,
+                  times: (if $schedtimes=="" then [] else ($schedtimes|split(" ")) end),
+                  pid: $schedpid, last_exit_code: $lastexit },
       running: ($running=="yes"),
       running_pids: (if $pids=="" then [] else ($pids|split(",")) end),
       latest: (if $latestid=="" then null else { short_id: $latestid, time: $latestiso, age_seconds: $lateage } end),
@@ -182,8 +190,9 @@ if [[ "$MODE" == "terminal" ]]; then
   sched="not loaded"
   if [[ "$SCHED_LOADED" == "yes" ]]; then
     sched="loaded"
-    [[ -n "$EVERY_HOURS" ]] && sched+=", every ${EVERY_HOURS}h"
-    [[ -n "$SCHED_LAST_EXIT" ]] && sched+=", last exit ${SCHED_LAST_EXIT}"
+    if [[ -n "$SCHED_TIMES" ]]; then sched+=", daily at ${SCHED_TIMES}"
+    elif [[ -n "$EVERY_HOURS" ]]; then sched+=", every ${EVERY_HOURS}h"; fi
+    [[ "$SCHED_LAST_EXIT" =~ ^-?[0-9]+$ ]] && sched+=", last exit ${SCHED_LAST_EXIT}"
   fi
   printf "  %-12s %s\n" "Schedule:" "$sched"
   if [[ "$RUNNING" == "yes" ]]; then
@@ -316,7 +325,7 @@ cat > "$HTML_PATH" <<HTML
       <div class=gauge><div style="width:${gauge_pct}%"></div></div>
       <div class=repo>within ${THRESHOLD_HOURS}h window</div></div>
     <div class=card><div class=k>Schedule</div><div class=v>$( [[ "$SCHED_LOADED" == yes ]] && echo "Loaded" || echo "Off" )</div>
-      <div class=repo>$( [[ -n "$EVERY_HOURS" ]] && echo "every ${EVERY_HOURS}h" || echo "—" )$( [[ -n "$SCHED_LAST_EXIT" ]] && echo " · last exit ${SCHED_LAST_EXIT}" )</div></div>
+      <div class=repo>$( [[ -n "$SCHED_TIMES" ]] && echo "daily at ${SCHED_TIMES}" || { [[ -n "$EVERY_HOURS" ]] && echo "every ${EVERY_HOURS}h" || echo "—"; } )$( [[ "$SCHED_LAST_EXIT" =~ ^-?[0-9]+$ ]] && echo " · last exit ${SCHED_LAST_EXIT}" )</div></div>
     <div class=card><div class=k>Repo size</div><div class=v>$(human "$REPO_STORED")</div>
       <div class=repo>${REPO_BLOBS} blobs</div></div>
     <div class=card><div class=k>Snapshots</div><div class=v>${SNAP_COUNT}</div>

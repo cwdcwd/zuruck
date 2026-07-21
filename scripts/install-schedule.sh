@@ -59,13 +59,17 @@ RUNNER_DIR="$HOME/Library/Application Support/Zuruck"
 RUNNER_BIN="$RUNNER_DIR/zuruck-runner"
 
 # Compile + ad-hoc sign the wrapper, baking in the absolute path to backup.sh.
-# Rebuilds only when the source is newer than the binary (rebuilding changes the
-# code hash and invalidates the FDA grant, so we avoid gratuitous rebuilds).
+# IMPORTANT: rebuilding changes the binary's code hash, which INVALIDATES the
+# Full Disk Access grant (TCC keys on the hash). So a normal install NEVER
+# rebuilds an existing binary — only an explicit `--build-runner` does (after
+# which you must re-grant FDA). Backup logic lives in backup.sh, not here, so
+# the binary rarely needs to change.
 build_runner() {
+  local force="${1:-}"
   command -v clang >/dev/null 2>&1 || { echo "ERROR: clang not found (install Xcode Command Line Tools: xcode-select --install)." >&2; return 1; }
   mkdir -p "$RUNNER_DIR"
-  if [[ -x "$RUNNER_BIN" && "$RUNNER_BIN" -nt "$RUNNER_SRC" ]]; then
-    return 0
+  if [[ -x "$RUNNER_BIN" && "$force" != "force" ]]; then
+    return 0   # keep the existing binary so the FDA grant stays valid
   fi
   echo "==> Building FDA wrapper: $RUNNER_BIN"
   clang -O2 -Wall -Wextra -o "$RUNNER_BIN" "$RUNNER_SRC" \
@@ -87,7 +91,7 @@ fi
 
 # ── Build-only ──────────────────────────────────────────────────────────────
 if [[ "$ACTION" == "build-runner" ]]; then
-  build_runner
+  build_runner force
   echo "Runner: $RUNNER_BIN"
   echo "Grant Full Disk Access to that path (System Settings › Privacy & Security)."
   exit 0
@@ -125,6 +129,15 @@ PATH_VALUE="$(printf '%s' "$BIN_DIRS" | tr ':' '\n' | awk '!seen[$0]++' | paste 
 prog_args=$'\t\t<string>'"$RUNNER_BIN"$'</string>\n'
 for a in "${BACKUP_ARGS[@]}"; do prog_args+=$'\t\t<string>'"$a"$'</string>\n'; done
 
+# StartCalendarInterval: fire at fixed wall-clock hours spaced EVERY_HOURS apart
+# across the day (predictable, unlike a rolling StartInterval). launchd still
+# coalesces runs missed during sleep into a single catch-up on the next wake.
+cal_entries=""; cal_hours=()
+for (( h=0; h<24; h+=EVERY_HOURS )); do
+  cal_entries+=$'\t\t<dict><key>Hour</key><integer>'"$h"$'</integer><key>Minute</key><integer>0</integer></dict>\n'
+  cal_hours+=("$(printf '%02d:00' "$h")")
+done
+
 read -r -d '' PLIST_XML <<XML || true
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -144,16 +157,15 @@ $prog_args	</array>
 		<key>HOME</key>
 		<string>$HOME</string>
 	</dict>
-	<key>StartInterval</key>
-	<integer>$INTERVAL</integer>
+	<key>StartCalendarInterval</key>
+	<array>
+$cal_entries	</array>
 	<key>RunAtLoad</key>
 	<false/>
 	<key>StandardOutPath</key>
 	<string>$LOG</string>
 	<key>StandardErrorPath</key>
 	<string>$LOG</string>
-	<key>ProcessType</key>
-	<string>Background</string>
 	<key>LowPriorityIO</key>
 	<true/>
 </dict>
@@ -174,9 +186,10 @@ launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
 launchctl bootstrap "$DOMAIN" "$PLIST" 2>/dev/null || launchctl load -w "$PLIST"
 launchctl enable "$DOMAIN/$LABEL" 2>/dev/null || true
 
-echo "Installed schedule '$LABEL': every ${EVERY_HOURS}h → backup.sh ${BACKUP_ARGS[*]}"
+echo "Installed schedule '$LABEL': daily at ${cal_hours[*]} → backup.sh ${BACKUP_ARGS[*]}"
 echo "  plist: $PLIST"
 echo "  log:   $LOG"
+echo "  note:  runs missed while the Mac is asleep are coalesced into one catch-up on wake."
 echo
 echo "Run once now:   launchctl kickstart -k $DOMAIN/$LABEL"
 echo "Check it:       ./scripts/install-schedule.sh --status"

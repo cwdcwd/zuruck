@@ -58,6 +58,12 @@ done
 source "$ENV_FILE"
 : "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY not set in $ENV_FILE}"
 
+# Clear locks left behind by a killed run (e.g. the Mac slept mid-backup, or a
+# scheduled job was force-stopped). `restic unlock` only removes STALE locks —
+# a still-running backup's live lock is left untouched — so this is safe to run
+# unconditionally and keeps the exclusive-lock `prune` step from failing later.
+restic unlock >/dev/null 2>&1 || true
+
 # ── Resolve the exclude file ──────────────────────────────────────────────
 EXCLUDE_FILE="${RESTIC_EXCLUDE_FILE:-}"
 if [[ -z "$EXCLUDE_FILE" ]]; then
@@ -119,10 +125,16 @@ fi
 # See docs/backup-strategy.md.
 if $DO_FORGET && ! $DRY_RUN; then
   echo "==> Applying retention (keep d=$KEEP_DAILY w=$KEEP_WEEKLY m=$KEEP_MONTHLY y=$KEEP_YEARLY) + prune"
+  # The snapshot already succeeded by this point; don't let a retention/prune
+  # hiccup (e.g. a lock we couldn't clear) mark the whole backup as failed.
+  set +e
   restic forget \
     --keep-daily "$KEEP_DAILY" --keep-weekly "$KEEP_WEEKLY" \
     --keep-monthly "$KEEP_MONTHLY" --keep-yearly "$KEEP_YEARLY" \
     --prune
+  FORGET_RC=$?
+  set -e
+  [[ $FORGET_RC -ne 0 ]] && echo "WARNING: retention/prune failed (exit $FORGET_RC); snapshot is safe, will retry next run." >&2
 fi
 
 echo "==> Done. Snapshots:"
