@@ -58,6 +58,18 @@ done
 source "$ENV_FILE"
 : "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY not set in $ENV_FILE}"
 
+# ── Keep the Mac awake for the whole backup ───────────────────────────────
+# A laptop that idle-sleeps mid-backup tears down the GUI launchd session and
+# SIGTERMs the job: observed on 2026-07-24 — restic was killed at ~2h with exit
+# 130 ("signal terminated received") when the machine slept, even though the
+# backup was healthy (0 timeouts, 0 watchdog fires). caffeinate holds a power
+# assertion tied to THIS script's pid ($$): -i no idle sleep, -m no disk idle
+# sleep, -s no system sleep (AC only), -w waits on $$ so it releases on exit.
+# No effect if caffeinate is missing (e.g. Linux); the watchdog still bounds runtime.
+if command -v caffeinate >/dev/null 2>&1; then
+  caffeinate -imsw "$$" >/dev/null 2>&1 &
+fi
+
 # ── S3 tuning + network readiness ─────────────────────────────────────────
 # Optional: cap parallel S3 connections (restic default is 5). Lower it on a
 # flaky/reconnecting link to reduce connect timeouts. Set S3_CONNECTIONS in
