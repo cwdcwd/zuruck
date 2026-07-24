@@ -430,6 +430,31 @@ running, `267011` = never run. VSS requires the task to run elevated (it runs as
 SYSTEM); a non-elevated manual `backup.ps1` skips locked files with a warning.
 See the [Windows Client Setup Guide](./windows-setup-guide.md).
 
+### Transient S3 Timeouts (`i/o timeout`, `TLS handshake timeout`)
+
+**Symptom**: log lines like `Save(<data/…>) returned error, retrying after …:
+… dial tcp …:443: i/o timeout`, each followed by `operation successful after N
+retries`.
+
+**Cause**: transient network flakiness — restic couldn't open a connection to
+S3 within its timeout and **retried** (up to 10× with backoff). If every error is
+followed by `operation successful`, **nothing failed**. On laptops these cluster
+at the start of a post-wake run, when Wi-Fi is still re-associating while restic
+fires ~5 parallel S3 connections.
+
+**Mitigations** (both built into `backup.sh` / `backup.ps1`):
+- A **network-readiness wait** runs before the backup, so a post-wake run doesn't
+  start mid-reconnect. Disable with `ZURUCK_SKIP_NET_WAIT=1` (bash) or
+  `SkipNetWait = $true` in `config.psd1` (Windows); tune with `NET_WAIT_TRIES` /
+  `NetWaitTries`.
+- **Lower S3 concurrency** on a persistently weak link: set `S3_CONNECTIONS=2`
+  in `/etc/restic/env` (bash) or `S3Connections = 2` in `config.psd1` (Windows).
+  This passes `-o s3.connections=N` to restic (default 5) — steadier, slightly
+  slower.
+
+Only escalate if retries are **exhausted** (restic exits 1, or exit 3 with a
+"could not be read" summary) — that means a real outage, not flakiness.
+
 ## Key Rotation
 
 > **Cadence**: rotate IAM access keys every 90 days (tagged

@@ -126,6 +126,9 @@ $configText = @"
     ExcludeFile             = $(& $q (Join-Path $PSScriptRoot 'restic-excludes.txt'))
     FreshnessThresholdHours = 48
     UseVss                  = `$true
+    S3Connections           = 0        # 0 = restic default (5); lower (e.g. 2) for flaky links
+    NetWaitTries            = 12       # wait up to 12x5s for S3 to answer after wake
+    SkipNetWait             = `$false
     KeepDaily               = 7
     KeepWeekly              = 4
     KeepMonthly             = 6

@@ -122,5 +122,10 @@ first. See the [runbook](./runbook.md#recovery-quickstart) for the recovery mode
 - **"repository is already locked"**: `backup.ps1` clears stale locks
   automatically; to clear by hand: `restic unlock` (with the env loaded).
 - **`restic mount` fails**: install WinFsp (`winget install WinFsp.WinFsp`).
+- **`i/o timeout` / retry spam in the log**: transient network flakiness (common
+  right after wake); restic retries and recovers. `backup.ps1` already waits for
+  the S3 endpoint before starting. For a persistently weak link, set
+  `S3Connections = 2` in `config.psd1`. See the runbook's
+  [Transient S3 Timeouts](./runbook.md#transient-s3-timeouts-io-timeout-tls-handshake-timeout).
 - **Wrong-password / access-denied**: re-run `setup.ps1` (it reuses the existing
   client password unless you pass `-RotateClientPassword`).

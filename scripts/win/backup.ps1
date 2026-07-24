@@ -67,8 +67,33 @@ if ($useVss -and -not (Test-ZuruckElevated)) {
     $useVss = $false
 }
 
+# ── S3 tuning + network readiness ──────────────────────────────────────────
+# Optional: cap parallel S3 connections (config.S3Connections; restic default 5)
+# to reduce connect timeouts on a flaky link.
+$globalOpts = @()
+if ($cfg.ContainsKey('S3Connections') -and $cfg.S3Connections) {
+    $globalOpts = @('-o', "s3.connections=$($cfg.S3Connections)")
+}
+
+# A scheduled run often fires right after wake, while the network is still
+# coming up — a burst of S3 connect timeouts (restic retries, but it's noisy).
+# Wait briefly for the S3 endpoint to answer first. Skip with SkipNetWait=$true.
+function Wait-ForS3 {
+    if ($cfg.ContainsKey('SkipNetWait') -and $cfg.SkipNetWait) { return }
+    if ($env:RESTIC_REPOSITORY -notlike 's3:*') { return }
+    $s3host = ($env:RESTIC_REPOSITORY -replace '^s3:', '').Split('/')[0]
+    $tries = if ($cfg.ContainsKey('NetWaitTries')) { [int]$cfg.NetWaitTries } else { 12 }
+    for ($i = 1; $i -le $tries; $i++) {
+        if (Test-NetConnection -ComputerName $s3host -Port 443 -InformationLevel Quiet -WarningAction SilentlyContinue) { return }
+        Write-Warning "[net] $s3host not reachable yet (attempt $i/$tries); waiting 5s..."
+        Start-Sleep -Seconds 5
+    }
+    Write-Warning "[net] proceeding without confirmed reachability; restic will retry."
+}
+Wait-ForS3
+
 # ── Clear stale locks from a killed run (safe: only removes stale locks) ────
-& restic unlock *> $null
+& restic @globalOpts unlock *> $null
 
 # ── Build restic args ──────────────────────────────────────────────────────
 $rargs = @('backup') + $existing + @('--tag', $Tag, '--exclude-caches')
@@ -81,7 +106,7 @@ Write-Host "==> Excludes:   $(if ($excludeFile) { $excludeFile } else { '<none>'
 Write-Host "==> VSS:        $(if ($useVss) { 'on (--use-fs-snapshot)' } else { 'off' })"
 Write-Host "==> Backing up: $($existing -join ', ')"
 
-& restic @rargs
+& restic @globalOpts @rargs
 $backupRc = $LASTEXITCODE
 # 0 = ok, 3 = snapshot created but some files unreadable (treat as warning).
 if ($backupRc -eq 3) {
@@ -94,7 +119,7 @@ if ($backupRc -eq 3) {
 # ── Optional retention (never fatal — the snapshot already saved) ──────────
 if ($Forget -and -not $DryRun) {
     Write-Host "==> Applying retention (keep d=$keepDaily w=$keepWeekly m=$keepMonthly y=$keepYearly) + prune"
-    & restic forget `
+    & restic @globalOpts forget `
         --keep-daily $keepDaily --keep-weekly $keepWeekly `
         --keep-monthly $keepMonthly --keep-yearly $keepYearly --prune
     if ($LASTEXITCODE -ne 0) {
@@ -103,7 +128,7 @@ if ($Forget -and -not $DryRun) {
 }
 
 Write-Host "==> Done. Snapshots:"
-& restic snapshots --latest 5 2>$null
+& restic @globalOpts snapshots --latest 5 2>$null
 
 # ── Refresh the local status dashboard (best-effort) ───────────────────────
 $statusScript = Join-Path $PSScriptRoot 'status.ps1'
