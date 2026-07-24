@@ -129,6 +129,7 @@ $configText = @"
     S3Connections           = 0        # 0 = restic default (5); lower (e.g. 2) for flaky links
     NetWaitTries            = 12       # wait up to 12x5s for S3 to answer after wake
     SkipNetWait             = `$false
+    MaxRuntimeSeconds       = 14400    # kill a wedged restic after 4h; raise for a slow initial seed
     KeepDaily               = 7
     KeepWeekly              = 4
     KeepMonthly             = 6
