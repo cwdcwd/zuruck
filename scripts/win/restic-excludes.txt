@@ -1,0 +1,53 @@
+# Zuruck — restic exclude patterns for Windows clients.
+# Applied via `restic backup --iexclude-file` (case-insensitive matching).
+# One pattern per line; '#' starts a comment. Windows analog of
+# scripts/restic-excludes.txt.
+
+# ── OS / swap / recycle (usually locked or worthless) ──────────────────────
+pagefile.sys
+hiberfil.sys
+swapfile.sys
+DumpStack.log.tmp
+$Recycle.Bin
+System Volume Information
+$WinREAgent
+Recovery
+
+# ── Per-user temp & caches ─────────────────────────────────────────────────
+AppData/Local/Temp
+AppData/Local/Microsoft/Windows/INetCache
+AppData/Local/Microsoft/Windows/WebCache
+AppData/Local/Microsoft/Windows/Explorer
+AppData/Local/Microsoft/Terminal Server Client/Cache
+AppData/Local/Packages/*/AC
+AppData/Local/CrashDumps
+AppData/Local/D3DSCache
+
+# ── Browser caches ─────────────────────────────────────────────────────────
+**/Cache/Cache_Data
+**/Code Cache
+**/GPUCache
+**/Service Worker/CacheStorage
+AppData/Local/Google/Chrome/User Data/*/Cache
+AppData/Local/Microsoft/Edge/User Data/*/Cache
+AppData/Roaming/Mozilla/Firefox/Profiles/*/cache2
+
+# ── Dev / build artifacts ──────────────────────────────────────────────────
+node_modules
+.venv
+venv
+__pycache__
+.mypy_cache
+.pytest_cache
+target
+build
+dist
+.gradle
+.terraform
+
+# ── Junk / lock files ──────────────────────────────────────────────────────
+Thumbs.db
+ehthumbs.db
+desktop.ini
+~$*
+*.tmp

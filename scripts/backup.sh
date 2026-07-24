@@ -58,11 +58,37 @@ done
 source "$ENV_FILE"
 : "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY not set in $ENV_FILE}"
 
+# ── S3 tuning + network readiness ─────────────────────────────────────────
+# Optional: cap parallel S3 connections (restic default is 5). Lower it on a
+# flaky/reconnecting link to reduce connect timeouts. Set S3_CONNECTIONS in
+# /etc/restic/env or the environment.
+RESTIC_OPTS=()
+[[ -n "${S3_CONNECTIONS:-}" ]] && RESTIC_OPTS+=(-o "s3.connections=$S3_CONNECTIONS")
+
+# On a laptop the scheduled run often fires right after wake, while Wi-Fi is
+# still re-associating — a burst of S3 connect timeouts (restic retries through
+# them, but it's noisy). Wait briefly for the S3 endpoint to answer first.
+# Disable with ZURUCK_SKIP_NET_WAIT=1; tune attempts with NET_WAIT_TRIES.
+wait_for_s3() {
+  [[ "${ZURUCK_SKIP_NET_WAIT:-}" == 1 ]] && return 0
+  [[ "$RESTIC_REPOSITORY" == s3:* ]] || return 0
+  command -v curl >/dev/null 2>&1 || return 0
+  local body="${RESTIC_REPOSITORY#s3:}" host tries="${NET_WAIT_TRIES:-12}" i
+  host="${body%%/*}"
+  for (( i=1; i<=tries; i++ )); do
+    curl -s -o /dev/null --max-time 5 "https://$host/" && return 0
+    echo "[net] $host not reachable yet (attempt $i/$tries); waiting 5s..." >&2
+    sleep 5
+  done
+  echo "[net] proceeding without confirmed reachability; restic will retry." >&2
+}
+wait_for_s3
+
 # Clear locks left behind by a killed run (e.g. the Mac slept mid-backup, or a
 # scheduled job was force-stopped). `restic unlock` only removes STALE locks —
 # a still-running backup's live lock is left untouched — so this is safe to run
 # unconditionally and keeps the exclusive-lock `prune` step from failing later.
-restic unlock >/dev/null 2>&1 || true
+restic "${RESTIC_OPTS[@]}" unlock >/dev/null 2>&1 || true
 
 # ── Resolve the exclude file ──────────────────────────────────────────────
 EXCLUDE_FILE="${RESTIC_EXCLUDE_FILE:-}"
@@ -109,7 +135,7 @@ echo "==> Backing up: ${EXISTING[*]}"
 # (locked/deleted mid-scan, permissions). Treat 3 as a warning so retention still
 # runs and an unattended job isn't marked failed for a transient unreadable file.
 set +e
-restic "${ARGS[@]}"
+restic "${RESTIC_OPTS[@]}" "${ARGS[@]}"
 BACKUP_RC=$?
 set -e
 if [[ $BACKUP_RC -eq 3 ]]; then
@@ -128,7 +154,7 @@ if $DO_FORGET && ! $DRY_RUN; then
   # The snapshot already succeeded by this point; don't let a retention/prune
   # hiccup (e.g. a lock we couldn't clear) mark the whole backup as failed.
   set +e
-  restic forget \
+  restic "${RESTIC_OPTS[@]}" forget \
     --keep-daily "$KEEP_DAILY" --keep-weekly "$KEEP_WEEKLY" \
     --keep-monthly "$KEEP_MONTHLY" --keep-yearly "$KEEP_YEARLY" \
     --prune
@@ -138,7 +164,7 @@ if $DO_FORGET && ! $DRY_RUN; then
 fi
 
 echo "==> Done. Snapshots:"
-restic snapshots --latest 5 2>/dev/null || true
+restic "${RESTIC_OPTS[@]}" snapshots --latest 5 2>/dev/null || true
 
 # Refresh the local status dashboard (best-effort; never fail the backup over it).
 if [[ -x "$SCRIPT_DIR/status.sh" ]]; then

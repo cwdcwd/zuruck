@@ -165,6 +165,10 @@ On **macOS**, don't hand-roll the schedule — use `scripts/install-schedule.sh`
 which installs a launchd LaunchAgent running through a Full Disk Access wrapper.
 See [Client Setup Guide → Option C](./client-setup-guide.md#option-c-macos-launchd-use-scriptsinstall-schedulesh).
 
+On **Windows**, use `scripts/win/install-task.ps1` — a Scheduled Task running as
+SYSTEM with VSS and `StartWhenAvailable`. See the
+[Windows Client Setup Guide](./windows-setup-guide.md).
+
 ### Systemd Timer Example
 
 Replace `RESTIC_BIN` below with the absolute path from `command -v restic`

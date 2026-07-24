@@ -171,7 +171,15 @@ zuruck/
 │   ├── zuruck-runner.c             # dedicated FDA wrapper the schedule runs through
 │   ├── status.sh                   # local status: terminal / JSON / HTML dashboard
 │   ├── restore.sh                  # guided recovery (list/browse/dump/restore/mount/stage)
-│   └── restic-excludes.txt         # default exclude patterns
+│   ├── restic-excludes.txt         # default exclude patterns
+│   └── win/                        # Windows client (native PowerShell)
+│       ├── zuruck.psm1             # shared: config + DPAPI secrets + helpers
+│       ├── setup.ps1               # onboarding (DPAPI secrets, config, repo init)
+│       ├── backup.ps1              # restic wrapper (VSS, unlock, hardening)
+│       ├── install-task.ps1        # Scheduled Task (SYSTEM, VSS, StartWhenAvailable)
+│       ├── status.ps1              # local status: terminal / JSON / HTML
+│       ├── restore.ps1             # guided recovery
+│       └── restic-excludes.txt     # Windows exclude patterns
 ├── docs/
 │   ├── plans/backup-system-plan.md  # Architecture plan
 │   ├── backup-strategy.md           # Retention + cold storage strategy
@@ -221,9 +229,14 @@ zuruck/
 | `./scripts/status.sh` | Local backup health (add `--html --open` for the dashboard) |
 | `./scripts/restore.sh list` | List snapshots (then `restore` / `dump` / `browse` — see [runbook](docs/runbook.md#recovery-quickstart)) |
 
+On **Windows**, use the PowerShell equivalents in `scripts/win/`
+(`setup.ps1` → `backup.ps1` → `install-task.ps1` → `status.ps1` / `restore.ps1`);
+see the [Windows Client Setup Guide](docs/windows-setup-guide.md).
+
 ## Documentation
 
 - [Backup Strategy](docs/backup-strategy.md) — Retention policies, cold storage, and restore procedures
-- [Client Setup Guide](docs/client-setup-guide.md) — Step-by-step instructions for client machines
+- [Client Setup Guide](docs/client-setup-guide.md) — Step-by-step instructions for macOS/Linux clients
+- [Windows Client Setup Guide](docs/windows-setup-guide.md) — PowerShell client (DPAPI, VSS, Task Scheduler)
 - [Operational Runbook](docs/runbook.md) — Adding/removing clients, emergency restore, key rotation
 - [Architecture Plan](docs/plans/backup-system-plan.md) — Full design document with decisions
