@@ -249,6 +249,14 @@ After the first backup completes, verify that CloudWatch metrics are being publi
 - Check network connectivity to `s3.us-west-2.amazonaws.com`
 - Verify the AWS region matches your deployment
 
+### `i/o timeout` / retry spam during backup
+
+Transient network flakiness (often right after wake) — restic retries and
+recovers, so `operation successful after N retries` means nothing failed.
+`backup.sh` waits for the S3 endpoint before starting; on a persistently weak
+link, set `S3_CONNECTIONS=2` in `/etc/restic/env` to cap parallel connections.
+See the runbook's [Transient S3 Timeouts](./runbook.md#transient-s3-timeouts-io-timeout-tls-handshake-timeout).
+
 ### Glacier restore needed
 
 If backups have transitioned to Glacier, you must restore objects before running `restic restore`:
