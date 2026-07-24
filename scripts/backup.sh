@@ -84,6 +84,27 @@ wait_for_s3() {
 }
 wait_for_s3
 
+# Runtime watchdog: a wedged restic (dead-but-established S3 connection) would
+# otherwise run forever and, because launchd won't start an overlapping run,
+# silently block the whole schedule. Cap each restic invocation at MAX_RUNTIME_SECS
+# (default 4h); raise it via /etc/restic/env for a slow initial seed. macOS has no
+# `timeout`, so we run restic in the background with a killer subshell.
+MAX_RUNTIME_SECS="${MAX_RUNTIME_SECS:-14400}"
+run_with_timeout() {
+  local secs="$1"; shift
+  "$@" &
+  local pid=$! rc=0
+  ( sleep "$secs" && kill -TERM "$pid" 2>/dev/null && sleep 15 && kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  local wd=$!
+  wait "$pid" 2>/dev/null || rc=$?
+  kill -TERM "$wd" 2>/dev/null || true
+  wait "$wd" 2>/dev/null || true
+  if (( rc == 143 || rc == 137 )); then
+    echo "[watchdog] restic exceeded ${secs}s and was terminated (exit $rc)." >&2
+  fi
+  return $rc
+}
+
 # Clear locks left behind by a killed run (e.g. the Mac slept mid-backup, or a
 # scheduled job was force-stopped). `restic unlock` only removes STALE locks —
 # a still-running backup's live lock is left untouched — so this is safe to run
@@ -135,7 +156,7 @@ echo "==> Backing up: ${EXISTING[*]}"
 # (locked/deleted mid-scan, permissions). Treat 3 as a warning so retention still
 # runs and an unattended job isn't marked failed for a transient unreadable file.
 set +e
-restic "${RESTIC_OPTS[@]}" "${ARGS[@]}"
+run_with_timeout "$MAX_RUNTIME_SECS" restic "${RESTIC_OPTS[@]}" "${ARGS[@]}"
 BACKUP_RC=$?
 set -e
 if [[ $BACKUP_RC -eq 3 ]]; then
@@ -154,7 +175,7 @@ if $DO_FORGET && ! $DRY_RUN; then
   # The snapshot already succeeded by this point; don't let a retention/prune
   # hiccup (e.g. a lock we couldn't clear) mark the whole backup as failed.
   set +e
-  restic "${RESTIC_OPTS[@]}" forget \
+  run_with_timeout "$MAX_RUNTIME_SECS" restic "${RESTIC_OPTS[@]}" forget \
     --keep-daily "$KEEP_DAILY" --keep-weekly "$KEEP_WEEKLY" \
     --keep-monthly "$KEEP_MONTHLY" --keep-yearly "$KEEP_YEARLY" \
     --prune

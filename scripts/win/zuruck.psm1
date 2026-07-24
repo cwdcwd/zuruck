@@ -138,6 +138,30 @@ function Invoke-ResticToFile {
     if ($p.ExitCode -ne 0) { throw "restic exited $($p.ExitCode) writing $OutFile" }
 }
 
+# Run restic with a hard runtime cap. A wedged restic (dead-but-established S3
+# connection) would otherwise run forever and block the schedule. Output inherits
+# the console (flows to the task log). Returns restic's exit code, or 124 if it
+# was killed for exceeding the timeout. Cross-version (ProcessStartInfo.Arguments).
+function Invoke-ResticWithTimeout {
+    param([Parameter(Mandatory)][string[]]$ResticArgs,
+          [int]$TimeoutSeconds = 14400)
+    $exe = (Get-Command restic -ErrorAction Stop).Source
+    $quote = { param($a) $s = [string]$a; if ($s -match '[\s"]') { '"' + ($s -replace '"', '\"') + '"' } else { $s } }
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName        = $exe
+    $psi.Arguments       = (($ResticArgs | ForEach-Object { & $quote $_ }) -join ' ')
+    $psi.UseShellExecute = $false      # inherit stdout/stderr → task log
+    $p = [System.Diagnostics.Process]::Start($psi)
+    if ($TimeoutSeconds -gt 0 -and -not $p.WaitForExit($TimeoutSeconds * 1000)) {
+        Write-Warning "[watchdog] restic exceeded ${TimeoutSeconds}s; terminating (pid $($p.Id))."
+        try { $p.Kill() } catch { Write-Verbose "$_" }
+        Start-Sleep -Seconds 5
+        if (-not $p.HasExited) { try { $p.Kill() } catch { Write-Verbose "$_" } }
+        return 124
+    }
+    return $p.ExitCode
+}
+
 # ── Formatting ─────────────────────────────────────────────────────────────
 function Format-ZuruckBytes {
     param([double]$Bytes = 0)
@@ -170,5 +194,5 @@ Export-ModuleMember -Function `
     Get-ZuruckRoot, Get-ZuruckConfigPath, Get-ZuruckSecretsDir, Get-ZuruckEntropyPath, `
     Initialize-ZuruckCrypto, Get-ZuruckEntropy, Protect-ZuruckSecret, Unprotect-ZuruckSecret, `
     Get-ZuruckConfig, Set-ZuruckEnvironment, Set-ZuruckAcl, `
-    Get-ResticSnapshotsJson, Get-ResticStatsJson, Invoke-ResticToFile, `
+    Get-ResticSnapshotsJson, Get-ResticStatsJson, Invoke-ResticToFile, Invoke-ResticWithTimeout, `
     Format-ZuruckBytes, Format-ZuruckAge, ConvertFrom-ResticTime, Test-ZuruckElevated

@@ -74,6 +74,8 @@ $globalOpts = @()
 if ($cfg.ContainsKey('S3Connections') -and $cfg.S3Connections) {
     $globalOpts = @('-o', "s3.connections=$($cfg.S3Connections)")
 }
+# Hard runtime cap so a wedged restic can't block the schedule (config default 4h).
+$maxRuntime = if ($cfg.ContainsKey('MaxRuntimeSeconds')) { [int]$cfg.MaxRuntimeSeconds } else { 14400 }
 
 # A scheduled run often fires right after wake, while the network is still
 # coming up — a burst of S3 connect timeouts (restic retries, but it's noisy).
@@ -106,8 +108,7 @@ Write-Host "==> Excludes:   $(if ($excludeFile) { $excludeFile } else { '<none>'
 Write-Host "==> VSS:        $(if ($useVss) { 'on (--use-fs-snapshot)' } else { 'off' })"
 Write-Host "==> Backing up: $($existing -join ', ')"
 
-& restic @globalOpts @rargs
-$backupRc = $LASTEXITCODE
+$backupRc = Invoke-ResticWithTimeout -ResticArgs (@($globalOpts) + $rargs) -TimeoutSeconds $maxRuntime
 # 0 = ok, 3 = snapshot created but some files unreadable (treat as warning).
 if ($backupRc -eq 3) {
     Write-Warning "restic reported unreadable source files (exit 3); snapshot was still created — continuing."
@@ -119,11 +120,12 @@ if ($backupRc -eq 3) {
 # ── Optional retention (never fatal — the snapshot already saved) ──────────
 if ($Forget -and -not $DryRun) {
     Write-Host "==> Applying retention (keep d=$keepDaily w=$keepWeekly m=$keepMonthly y=$keepYearly) + prune"
-    & restic @globalOpts forget `
-        --keep-daily $keepDaily --keep-weekly $keepWeekly `
-        --keep-monthly $keepMonthly --keep-yearly $keepYearly --prune
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warning "retention/prune failed (exit $LASTEXITCODE); snapshot is safe, will retry next run."
+    $forgetArgs = @($globalOpts) + @('forget',
+        '--keep-daily', $keepDaily, '--keep-weekly', $keepWeekly,
+        '--keep-monthly', $keepMonthly, '--keep-yearly', $keepYearly, '--prune')
+    $forgetRc = Invoke-ResticWithTimeout -ResticArgs $forgetArgs -TimeoutSeconds $maxRuntime
+    if ($forgetRc -ne 0) {
+        Write-Warning "retention/prune failed (exit $forgetRc); snapshot is safe, will retry next run."
     }
 }
 
