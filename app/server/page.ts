@@ -70,7 +70,12 @@ a.dl{color:var(--accent);text-decoration:none;font-size:13px}
 `;
 
 export function renderPage(cfg: PageConfig): string {
-  const config = JSON.stringify({ token: cfg.token, repo: cfg.repo });
+  // Escape `<` (and U+2028/2029) so no value can break out of the <script> tag,
+  // even though token/repo are trusted local values today.
+  const config = JSON.stringify({ token: cfg.token, repo: cfg.repo })
+    .replace(/</g, '\\u003c')
+    .replace(/\\u2028/g, '\\u2028')
+    .replace(/\\u2029/g, '\\u2029');
   return `<!doctype html>
 <html lang=en>
 <head>

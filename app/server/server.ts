@@ -86,14 +86,21 @@ async function main(): Promise<void> {
   // Directories this session has restored into — the only paths /api/reveal will open.
   const restored = new Set<string>();
   let lastActivity = Date.now();
+  let inFlight = 0; // never idle-shutdown while a request (e.g. a long restore) is running
   const touch = () => (lastActivity = Date.now());
 
   const server = http.createServer((req, res) => {
+    inFlight++;
     touch();
-    handle(req, res).catch((err) => {
-      if (!res.headersSent) sendJson(res, 500, { error: String(err?.message || err) });
-      else res.end();
-    });
+    handle(req, res)
+      .catch((err) => {
+        if (!res.headersSent) sendJson(res, 500, { error: String(err?.message || err) });
+        else res.end();
+      })
+      .finally(() => {
+        inFlight--;
+        touch();
+      });
   });
 
   async function handle(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
@@ -209,7 +216,7 @@ async function main(): Promise<void> {
   if (opts.idleTimeoutMin > 0) {
     const ms = opts.idleTimeoutMin * 60_000;
     setInterval(() => {
-      if (Date.now() - lastActivity > ms) {
+      if (inFlight === 0 && Date.now() - lastActivity > ms) {
         // eslint-disable-next-line no-console
         console.log(`Idle for ${opts.idleTimeoutMin}m — shutting down.`);
         process.exit(0);

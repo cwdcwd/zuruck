@@ -39,7 +39,10 @@ interface FnUrlResult {
   isBase64Encoded?: boolean;
 }
 
-const PREVIEW_CAP = 5 * 1024 * 1024; // 5 MiB base64 ceiling for a scaffold dump
+// Base64 inflates ~4/3, and a Function URL response caps at 6 MB — keep the raw
+// dump under ~4 MiB so the encoded body stays within that limit. Larger files
+// need the presigned-URL path (see the restore/sink follow-up in the header).
+const PREVIEW_CAP = 4 * 1024 * 1024;
 
 let cachedEnv: ResticEnv | null = null;
 
