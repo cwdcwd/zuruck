@@ -46,6 +46,11 @@ export interface ZuruckStackProps extends cdk.StackProps {
 }
 
 export class ZuruckStack extends cdk.Stack {
+  /** The backup bucket — exposed so the opt-in RecoveryUiStack can grant scoped read access. */
+  public readonly bucket: BackupBucket['bucket'];
+  /** The bucket/SSM KMS key — exposed for the RecoveryUiStack's kms:Decrypt grant. */
+  public readonly encryptionKey: BackupKms['key'];
+
   constructor(scope: Construct, id: string, props?: ZuruckStackProps) {
     super(scope, id, props);
 
@@ -110,5 +115,9 @@ export class ZuruckStack extends cdk.Stack {
           `The AccessKeyId is in the secret's Description.`,
       });
     }
+
+    // Expose for the opt-in RecoveryUiStack (bin/zuruck.ts, -c deployRecoveryUi).
+    this.bucket = bucket.bucket;
+    this.encryptionKey = kms.key;
   }
 }

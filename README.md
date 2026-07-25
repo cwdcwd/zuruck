@@ -180,10 +180,17 @@ zuruck/
 │       ├── status.ps1              # local status: terminal / JSON / HTML
 │       ├── restore.ps1             # guided recovery
 │       └── restic-excludes.txt     # Windows exclude patterns
+├── app/                            # Recovery UI (browse & restore in a browser)
+│   ├── core/                       # provider-agnostic restic logic (no HTTP/Lambda)
+│   ├── server/                     # local adapter: Node http server + token auth
+│   ├── web/                        # browser SPA (vanilla TypeScript)
+│   ├── lambda/                     # cloud adapter (scaffold) + restic layer fetch
+│   └── zuruck-ui.mjs               # launcher (esbuild-bundles server + SPA, runs it)
 ├── docs/
 │   ├── plans/backup-system-plan.md  # Architecture plan
 │   ├── backup-strategy.md           # Retention + cold storage strategy
 │   ├── client-setup-guide.md        # Step-by-step client instructions
+│   ├── recovery-ui.md               # Browse & restore in a browser (local + cloud scaffold)
 │   └── runbook.md                   # Operational runbook
 └── test/
     └── zuruck.test.ts
@@ -228,6 +235,7 @@ zuruck/
 | `./scripts/install-schedule.sh --status` | Is the schedule loaded / when did it last run |
 | `./scripts/status.sh` | Local backup health (add `--html --open` for the dashboard) |
 | `./scripts/restore.sh list` | List snapshots (then `restore` / `dump` / `browse` — see [runbook](docs/runbook.md#recovery-quickstart)) |
+| `npm run ui` | Browse snapshots & restore files in a **browser** (see [Recovery UI](docs/recovery-ui.md)) |
 
 On **Windows**, use the PowerShell equivalents in `scripts/win/`
 (`setup.ps1` → `backup.ps1` → `install-task.ps1` → `status.ps1` / `restore.ps1`);
@@ -238,5 +246,6 @@ see the [Windows Client Setup Guide](docs/windows-setup-guide.md).
 - [Backup Strategy](docs/backup-strategy.md) — Retention policies, cold storage, and restore procedures
 - [Client Setup Guide](docs/client-setup-guide.md) — Step-by-step instructions for macOS/Linux clients
 - [Windows Client Setup Guide](docs/windows-setup-guide.md) — PowerShell client (DPAPI, VSS, Task Scheduler)
+- [Recovery UI](docs/recovery-ui.md) — Browse snapshots & restore files in a browser (`npm run ui`); cloud-deploy scaffold
 - [Operational Runbook](docs/runbook.md) — Adding/removing clients, emergency restore, key rotation
 - [Architecture Plan](docs/plans/backup-system-plan.md) — Full design document with decisions

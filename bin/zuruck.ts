@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import * as cdk from 'aws-cdk-lib/core';
 import { ZuruckStack } from '../lib/zuruck-stack';
+import { RecoveryUiStack } from '../lib/recovery-ui-stack';
 import { CLIENTS, validateClientName } from '../lib/config/clients';
 
 const app = new cdk.App();
@@ -79,7 +80,7 @@ const enableAuditTrail =
 const auditS3DataEvents =
   String(app.node.tryGetContext('auditS3DataEvents') ?? 'false').toLowerCase() === 'true';
 
-new ZuruckStack(app, 'ZuruckStack', {
+const zuruckStack = new ZuruckStack(app, 'ZuruckStack', {
   env: {
     account: process.env.CDK_DEFAULT_ACCOUNT,
     region,
@@ -96,3 +97,19 @@ new ZuruckStack(app, 'ZuruckStack', {
     ManagedBy: 'cdk',
   },
 });
+
+// Opt-in recovery UI cloud stack (SCAFFOLD, deploy-later). Off by default so the
+// core backup stack is untouched; enable with `-c deployRecoveryUi=true` and
+// optionally `-c recoveryUiClient=<name>` (default: first registered client).
+if (String(app.node.tryGetContext('deployRecoveryUi') ?? 'false').toLowerCase() === 'true') {
+  const recoveryUiClient =
+    (app.node.tryGetContext('recoveryUiClient') as string | undefined) ?? CLIENTS[0].name;
+  new RecoveryUiStack(app, 'ZuruckRecoveryUiStack', {
+    env: { account: process.env.CDK_DEFAULT_ACCOUNT, region },
+    description: 'Recovery UI (SPA + restic API Lambda) — opt-in, isolated from the backup stack',
+    bucket: zuruckStack.bucket,
+    encryptionKey: zuruckStack.encryptionKey,
+    clientName: recoveryUiClient,
+    tags: { Project: 'zuruck', Purpose: 'recovery-ui', ManagedBy: 'cdk' },
+  });
+}

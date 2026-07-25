@@ -1,0 +1,11 @@
+{
+  "//": "Type-checks the Node-side recovery UI code (core + local server + Lambda adapter). esbuild does the actual build/bundle; this is check-only (noEmit).",
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "types": ["node"],
+    "lib": ["es2022"]
+  },
+  "exclude": [".run"],
+  "include": ["core/**/*.ts", "server/**/*.ts", "lambda/**/*.ts"]
+}
