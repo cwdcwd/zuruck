@@ -2,12 +2,13 @@
   "name": "zuruck",
   "version": "0.1.0",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && tsc -p app/tsconfig.json && tsc -p app/web/tsconfig.json",
     "watch": "tsc -w",
     "test": "jest",
     "synth": "cdk synth",
     "diff": "cdk diff",
-    "cdk": "cdk"
+    "cdk": "cdk",
+    "ui": "node app/zuruck-ui.mjs"
   },
   "devDependencies": {
     "@types/jest": "^30",

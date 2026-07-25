@@ -3,7 +3,8 @@
     "allow": [
       "Bash(restic version *)",
       "Bash(restic help *)",
-      "Bash(command -v jq)"
+      "Bash(command -v jq)",
+      "Bash(npm --version)"
     ]
   }
 }

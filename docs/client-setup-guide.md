@@ -125,6 +125,16 @@ restic snapshots
 restic stats
 ```
 
+## Recovering Files
+
+Two ways to get data back:
+
+- **CLI** — `./scripts/restore.sh list`, then `browse` / `dump` / `restore` (see
+  the [runbook](./runbook.md#recovery-quickstart)).
+- **Browser UI** — `npm run ui` opens a local app to browse snapshots, preview
+  files, and restore a selected set into a fresh folder. See
+  [Recovery UI](./recovery-ui.md).
+
 ## Step 6: Schedule Automatic Backups
 
 ### Option A: Systemd Timer (Recommended for Linux)

@@ -1,0 +1,11 @@
+{
+  "//": "Type-checks the browser SPA. DOM libs, no Node types. esbuild bundles it separately.",
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "lib": ["es2022", "dom", "dom.iterable"],
+    "types": []
+  },
+  "exclude": [],
+  "include": ["**/*.ts"]
+}

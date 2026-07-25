@@ -7,6 +7,10 @@ node_modules
 .cdk.staging
 cdk.out
 
+# Recovery UI build cache (esbuild output) + fetched restic Lambda binary
+app/.run
+app/lambda/layer/bin
+
 # General
 .DS_Store
 .localized
