@@ -119,6 +119,13 @@ npx cdk deploy
 }
 ```
 
+   Prefer a non-guessable name (e.g. `charlie-7f3a2c`, security-review S9).
+   This repo is public, so put suffixed names in the git-ignored
+   `lib/config/clients.local.json` instead of `clients.ts` (same fields, JSON;
+   see `clients.local.example.json`). Both lists are merged at synth time, and
+   duplicate names fail the synth. Keep a copy of the local file somewhere
+   private: the deploying machine is its only home.
+
 2. Redeploy: `npx cdk deploy`
 
 3. Retrieve the client's access key:
@@ -154,7 +161,7 @@ zuruck/
 ├── bin/zuruck.ts                    # CDK app entry point
 ├── lib/
 │   ├── zuruck-stack.ts              # Main stack (orchestrates constructs)
-│   ├── config/clients.ts            # Client definitions
+│   ├── config/clients.ts            # Client definitions (+ git-ignored clients.local.json)
 │   ├── constructs/
 │   │   ├── backup-bucket.ts         # S3 bucket + lifecycle + encryption
 │   │   ├── backup-iam.ts            # IAM users, group, policies per client

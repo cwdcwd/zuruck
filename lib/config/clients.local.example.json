@@ -1,0 +1,7 @@
+[
+  {
+    "name": "examplehost-1a2b3c",
+    "description": "copy this file to clients.local.json; use a random suffix per client",
+    "freshnessThresholdHours": 24
+  }
+]

@@ -68,3 +68,6 @@ Backups.backupdb
 .MobileBackups.trash
 MobileBackups.trash
 tmbootpicker.efi
+
+# Local, non-public client list (suffixed names; security-review S9)
+lib/config/clients.local.json

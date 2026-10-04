@@ -40,6 +40,13 @@ npx cdk deploy \
 }
 ```
 
+   Prefer a non-guessable name (e.g. `charlie-7f3a2c`, security-review S9).
+   This repo is public, so put suffixed names in the git-ignored
+   `lib/config/clients.local.json` instead of `clients.ts` (same fields, JSON;
+   see `clients.local.example.json`). Both lists are merged at synth time, and
+   duplicate names fail the synth. Keep a copy of the local file somewhere
+   private: the deploying machine is its only home.
+
 2. Deploy the stack:
 
 ```bash
@@ -88,7 +95,7 @@ aws ssm get-parameter \
 
 ## Removing a Client
 
-1. Remove the entry from `lib/config/clients.ts`
+1. Remove the entry from `lib/config/clients.ts` (or `clients.local.json`)
 2. Deploy: `npx cdk deploy`
 3. **Important**: The IAM user, the access-key Secrets Manager secret, and
    the freshness alarm are deleted. The S3 data and the SSM master-password
