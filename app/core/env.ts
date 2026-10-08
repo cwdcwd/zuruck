@@ -6,11 +6,29 @@
  * `export KEY=VALUE` lines directly. The cloud adapter does NOT use this — it
  * builds a ResticEnv from SSM + the Lambda role instead.
  */
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 import type { RepoUrl, ResticEnv } from './types';
 
+/**
+ * Resolve the env file the same way scripts/zuruck-common.sh does:
+ * $RESTIC_ENV_FILE, else the user-mode file (~/.config/zuruck/env, honouring
+ * $XDG_CONFIG_HOME) when it exists, else the system file /etc/restic/env.
+ */
+export function resolveDefaultEnvFile(
+  env: NodeJS.ProcessEnv = process.env,
+  exists: (p: string) => boolean = existsSync,
+  home: string = homedir(),
+): string {
+  if (env.RESTIC_ENV_FILE) return env.RESTIC_ENV_FILE;
+  const userEnv = join(env.XDG_CONFIG_HOME || join(home, '.config'), 'zuruck', 'env');
+  if (exists(userEnv)) return userEnv;
+  return '/etc/restic/env';
+}
+
 /** Default env file, matching the bash scripts. Override with $RESTIC_ENV_FILE. */
-export const DEFAULT_ENV_FILE = process.env.RESTIC_ENV_FILE || '/etc/restic/env';
+export const DEFAULT_ENV_FILE = resolveDefaultEnvFile();
 
 /**
  * Parse an /etc/restic/env-style file into a plain object. Handles optional

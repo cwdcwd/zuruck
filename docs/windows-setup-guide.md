@@ -95,6 +95,16 @@ was asleep fires on the next wake.
 .\status.ps1 -Json           # scriptable
 ```
 
+## Optional: report to a collector
+
+To send a status report to a collector (such as thecollector's dashboard) after every run, run this once, elevated:
+
+```powershell
+.\scripts\win\set-ingest.ps1 -Url http://collector.lan:8790/api/ingest -Test
+```
+
+It prompts for the ingest token, or reads `$env:ZURUCK_INGEST_TOKEN`. The token is stored DPAPI-encrypted in the secrets folder, and the URL goes in `%ProgramData%\zuruck\ingest.psd1`. `backup.ps1` then reports after each run, success or failure. A down collector only produces a warning. `-Disable` turns reporting off. See [User Mode, Root Scope & Reporting](user-mode-setup.md#collector-reporting) for the payload.
+
 ## Recovery
 
 ```powershell

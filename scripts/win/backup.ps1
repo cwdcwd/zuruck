@@ -19,6 +19,9 @@
   .\backup.ps1 -Path C:\Users\me\Docs  # back up only these paths
   .\backup.ps1 -DryRun                 # show what would be backed up
   .\backup.ps1 -Tag scheduled -Forget  # what the scheduled task runs
+
+  If set-ingest.ps1 has configured a collector, a status report is POSTed
+  after the run (success or failure).
 #>
 [CmdletBinding()]
 param(
@@ -113,6 +116,7 @@ $backupRc = Invoke-ResticWithTimeout -ResticArgs (@($globalOpts) + $rargs) -Time
 if ($backupRc -eq 3) {
     Write-Warning "restic reported unreadable source files (exit 3); snapshot was still created — continuing."
 } elseif ($backupRc -ne 0) {
+    if (-not $DryRun) { Send-ZuruckReport -ExitCode $backupRc -StatusScript (Join-Path $PSScriptRoot 'status.ps1') }
     Write-Error "restic backup failed (exit $backupRc)."
     exit $backupRc
 }
@@ -137,5 +141,8 @@ $statusScript = Join-Path $PSScriptRoot 'status.ps1'
 if (Test-Path $statusScript) {
     try { & $statusScript -Html | Out-Null } catch { Write-Verbose "$_" }
 }
+
+# ── Report to the collector, if configured (set-ingest.ps1; never fatal) ───
+if (-not $DryRun) { Send-ZuruckReport -ExitCode 0 -StatusScript $statusScript }
 
 exit 0

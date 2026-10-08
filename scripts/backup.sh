@@ -2,9 +2,12 @@
 #
 # Zuruck — restic backup wrapper
 #
-# Runs a restic backup of a sensible set of paths using the client's
-# /etc/restic/env (repository + AWS creds + password file) and the repo's
-# exclude list. Meant to be run manually or from cron/launchd/systemd.
+# Runs a restic backup of a sensible set of paths using the client's env file
+# (repository + AWS creds + password file) and the repo's exclude list. Meant
+# to be run manually or from cron/launchd/systemd.
+#
+# The env file is $RESTIC_ENV_FILE, else ~/.config/zuruck/env (user mode),
+# else /etc/restic/env. include/excludes are read from the same directory.
 #
 # Usage:
 #   ./scripts/backup.sh                      # back up the default path set
@@ -12,24 +15,40 @@
 #   ./scripts/backup.sh --forget             # back up, then apply retention + prune
 #   ./scripts/backup.sh --dry-run            # show what would be backed up
 #   ./scripts/backup.sh --tag nightly        # custom snapshot tag
+#   ./scripts/backup.sh --no-root            # skip the root-scope step for this run
+#   ./scripts/backup.sh --no-report          # don't send the ingest report
 #
 # What gets backed up:
 #   - Paths passed as arguments, OR
-#   - Paths listed in /etc/restic/include (one per line, # comments allowed), OR
+#   - Paths listed in <config dir>/include (one per line, # comments allowed), OR
 #   - A default home-directory set (real data + config/secrets), below.
 # Non-existent paths are skipped with a warning so restic doesn't abort.
 #
 # What gets excluded:
-#   - /etc/restic/excludes if present, else scripts/restic-excludes.txt.
+#   - <config dir>/excludes if present, else scripts/restic-excludes.txt.
 #   - Plus --exclude-caches (any dir tagged CACHEDIR.TAG).
+#
+# Optional steps, switched on by the env file:
+#   - ZURUCK_ROOT_BACKUP=1   after the user backup, run the root-scope backup
+#                            via `sudo -n /usr/local/sbin/zuruck-root-backup`
+#                            (installed by the owner: install-root-backup.sh)
+#   - ZURUCK_INGEST_URL=...  on exit, POST status.sh --json + the exit code to
+#                            the collector (report.sh), token in <config dir>/ingest-token
 #
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ENV_FILE="${RESTIC_ENV_FILE:-/etc/restic/env}"
+# shellcheck source=zuruck-common.sh
+source "$SCRIPT_DIR/zuruck-common.sh"
+zuruck_add_user_bin_to_path
+ENV_FILE="$(zuruck_resolve_env_file)"
+CONF_DIR="$(dirname "$ENV_FILE")"
 TAG="auto"
 DRY_RUN=false
 DO_FORGET=false
+DO_ROOT=auto
+DO_REPORT=true
+ROOT_WRAPPER=/usr/local/sbin/zuruck-root-backup
 
 # Retention when --forget is passed (matches the systemd unit in client-setup.sh).
 KEEP_DAILY=7
@@ -37,7 +56,7 @@ KEEP_WEEKLY=4
 KEEP_MONTHLY=6
 KEEP_YEARLY=2
 
-usage() { sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
+usage() { sed -n '2,42p' "$0" | sed 's/^# \{0,1\}//'; exit 0; }
 
 # ── Parse args (flags first, then any explicit paths) ─────────────────────
 PATHS=()
@@ -46,6 +65,8 @@ while [[ $# -gt 0 ]]; do
     --forget)  DO_FORGET=true; shift ;;
     --dry-run) DRY_RUN=true; shift ;;
     --tag)     TAG="$2"; shift 2 ;;
+    --no-root) DO_ROOT=false; shift ;;
+    --no-report) DO_REPORT=false; shift ;;
     -h|--help) usage ;;
     -*)        echo "Unknown option: $1" >&2; exit 1 ;;
     *)         PATHS+=("$1"); shift ;;
@@ -57,6 +78,18 @@ done
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 : "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY not set in $ENV_FILE}"
+export RESTIC_ENV_FILE="$ENV_FILE"   # so status.sh / report.sh read the same file
+
+# ── Report to the collector on every exit, success or failure ─────────────
+# Best-effort: a down collector never fails the backup. Dry runs don't report.
+on_exit() {
+  local rc=$?
+  if $DO_REPORT && ! $DRY_RUN && [[ -n "${ZURUCK_INGEST_URL:-}" && -x "$SCRIPT_DIR/report.sh" ]]; then
+    "$SCRIPT_DIR/report.sh" --exit-code "$rc" >&2 || echo "WARNING: ingest report failed (backup result unaffected)." >&2
+  fi
+  exit "$rc"
+}
+trap on_exit EXIT
 
 # ── Keep the Mac awake for the whole backup ───────────────────────────────
 # A laptop that idle-sleeps mid-backup tears down the GUI launchd session and
@@ -73,7 +106,7 @@ fi
 # ── S3 tuning + network readiness ─────────────────────────────────────────
 # Optional: cap parallel S3 connections (restic default is 5). Lower it on a
 # flaky/reconnecting link to reduce connect timeouts. Set S3_CONNECTIONS in
-# /etc/restic/env or the environment.
+# the env file or the environment.
 RESTIC_OPTS=()
 [[ -n "${S3_CONNECTIONS:-}" ]] && RESTIC_OPTS+=(-o "s3.connections=$S3_CONNECTIONS")
 
@@ -99,14 +132,19 @@ wait_for_s3
 # Runtime watchdog: a wedged restic (dead-but-established S3 connection) would
 # otherwise run forever and, because launchd won't start an overlapping run,
 # silently block the whole schedule. Cap each restic invocation at MAX_RUNTIME_SECS
-# (default 4h); raise it via /etc/restic/env for a slow initial seed. macOS has no
+# (default 4h); raise it via the env file for a slow initial seed. macOS has no
 # `timeout`, so we run restic in the background with a killer subshell.
 MAX_RUNTIME_SECS="${MAX_RUNTIME_SECS:-14400}"
 run_with_timeout() {
   local secs="$1"; shift
   "$@" &
   local pid=$! rc=0
-  ( sleep "$secs" && kill -TERM "$pid" 2>/dev/null && sleep 15 && kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
+  # The killer's own sleep is killed with it; otherwise every run leaks a
+  # `sleep $secs` process that outlives the backup by hours.
+  ( sleep "$secs" & sp=$!
+    trap 'kill "$sp" 2>/dev/null; exit 0' TERM
+    wait "$sp" || exit 0
+    kill -TERM "$pid" 2>/dev/null && sleep 15 && kill -KILL "$pid" 2>/dev/null ) >/dev/null 2>&1 &
   local wd=$!
   wait "$pid" 2>/dev/null || rc=$?
   kill -TERM "$wd" 2>/dev/null || true
@@ -126,19 +164,19 @@ restic "${RESTIC_OPTS[@]}" unlock >/dev/null 2>&1 || true
 # ── Resolve the exclude file ──────────────────────────────────────────────
 EXCLUDE_FILE="${RESTIC_EXCLUDE_FILE:-}"
 if [[ -z "$EXCLUDE_FILE" ]]; then
-  if [[ -f /etc/restic/excludes ]]; then
-    EXCLUDE_FILE=/etc/restic/excludes
+  if [[ -f "$CONF_DIR/excludes" ]]; then
+    EXCLUDE_FILE="$CONF_DIR/excludes"
   elif [[ -f "$SCRIPT_DIR/restic-excludes.txt" ]]; then
     EXCLUDE_FILE="$SCRIPT_DIR/restic-excludes.txt"
   fi
 fi
 
 # ── Resolve the set of paths to back up ───────────────────────────────────
-if [[ ${#PATHS[@]} -eq 0 && -f /etc/restic/include ]]; then
+if [[ ${#PATHS[@]} -eq 0 && -f "$CONF_DIR/include" ]]; then
   while IFS= read -r line; do
     line="${line%%#*}"; line="${line#"${line%%[![:space:]]*}"}"; line="${line%"${line##*[![:space:]]}"}"
     [[ -n "$line" ]] && PATHS+=("${line/#\~/$HOME}")
-  done < /etc/restic/include
+  done < "$CONF_DIR/include"
 fi
 if [[ ${#PATHS[@]} -eq 0 ]]; then
   PATHS=(
@@ -178,6 +216,24 @@ elif [[ $BACKUP_RC -ne 0 ]]; then
   exit "$BACKUP_RC"
 fi
 
+# ── Optional root-scope backup (owner-installed, exact-argv sudo grant) ───
+# Runs before retention so prune's exclusive lock never races it. The wrapper
+# takes no arguments; sudo -n fails fast instead of prompting.
+ROOT_RC=0
+if [[ "$DO_ROOT" == auto ]]; then
+  [[ "${ZURUCK_ROOT_BACKUP:-0}" == 1 ]] && DO_ROOT=true || DO_ROOT=false
+fi
+if $DO_ROOT && ! $DRY_RUN; then
+  echo "==> Root scope: sudo -n $ROOT_WRAPPER"
+  set +e
+  sudo -n "$ROOT_WRAPPER"
+  ROOT_RC=$?
+  set -e
+  if [[ $ROOT_RC -ne 0 ]]; then
+    echo "ERROR: root-scope backup failed (exit $ROOT_RC); user-scope snapshot is safe." >&2
+  fi
+fi
+
 # ── Optional retention ────────────────────────────────────────────────────
 # NOTE: on this bucket (versioning + Object Lock) --prune writes delete markers
 # but S3 space is only reclaimed once noncurrent versions age out (~90 days).
@@ -203,3 +259,7 @@ restic "${RESTIC_OPTS[@]}" snapshots --latest 5 2>/dev/null || true
 if [[ -x "$SCRIPT_DIR/status.sh" ]]; then
   "$SCRIPT_DIR/status.sh" --html >/dev/null 2>&1 || true
 fi
+
+# A failed root scope fails the run (so the timer and the report show it),
+# but only after retention and the status refresh have happened.
+exit "$ROOT_RC"

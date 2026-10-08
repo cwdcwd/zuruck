@@ -190,9 +190,48 @@ function Test-ZuruckElevated {
     return $p.IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 }
 
+# ── Collector reporting (optional; set up with set-ingest.ps1) ─────────────
+# Mirrors scripts/report.sh: POST status.ps1 -Json plus a `report` envelope to
+# the collector. No-op until ingest.psd1 exists. Never throws: a down
+# collector must not fail a backup.
+function Get-ZuruckIngestConfigPath { Join-Path (Get-ZuruckRoot) 'ingest.psd1' }
+function Get-ZuruckIngestTokenPath  { Join-Path (Get-ZuruckSecretsDir) 'ingest_token.bin' }
+
+function Send-ZuruckReport {
+    param([Nullable[int]]$ExitCode = $null,
+          [Parameter(Mandatory)][string]$StatusScript)
+    $cfgPath = Get-ZuruckIngestConfigPath
+    if (-not (Test-Path $cfgPath)) { return }
+    try {
+        $ing   = Import-PowerShellDataFile -Path $cfgPath
+        $token = Unprotect-ZuruckSecret -InFile (Get-ZuruckIngestTokenPath) -Entropy (Get-ZuruckEntropy)
+        $raw   = (& $StatusScript -Json | Out-String)
+        $status = if ($raw.Trim()) { ConvertFrom-Json $raw } else { New-Object psobject }
+        $cfg   = Get-ZuruckConfig
+        $report = [pscustomobject][ordered]@{
+            schema    = 1
+            host      = [Environment]::MachineName.ToLowerInvariant()
+            client    = $cfg.ClientName
+            platform  = 'windows'
+            sent_at   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+            exit_code = $ExitCode
+        }
+        $status | Add-Member -NotePropertyName report -NotePropertyValue $report -Force
+        $body = $status | ConvertTo-Json -Depth 8
+        Invoke-RestMethod -Uri $ing.Url -Method Post -Body $body -ContentType 'application/json' `
+            -Headers @{ Authorization = "Bearer $token" } -TimeoutSec 20 -UseBasicParsing | Out-Null
+        Write-Host "==> Reported status to $($ing.Url)"
+    } catch {
+        Write-Warning "ingest report failed (backup result unaffected): $($_.Exception.Message)"
+    } finally {
+        $token = $null
+    }
+}
+
 Export-ModuleMember -Function `
     Get-ZuruckRoot, Get-ZuruckConfigPath, Get-ZuruckSecretsDir, Get-ZuruckEntropyPath, `
     Initialize-ZuruckCrypto, Get-ZuruckEntropy, Protect-ZuruckSecret, Unprotect-ZuruckSecret, `
     Get-ZuruckConfig, Set-ZuruckEnvironment, Set-ZuruckAcl, `
     Get-ResticSnapshotsJson, Get-ResticStatsJson, Invoke-ResticToFile, Invoke-ResticWithTimeout, `
-    Format-ZuruckBytes, Format-ZuruckAge, ConvertFrom-ResticTime, Test-ZuruckElevated
+    Format-ZuruckBytes, Format-ZuruckAge, ConvertFrom-ResticTime, Test-ZuruckElevated, `
+    Get-ZuruckIngestConfigPath, Get-ZuruckIngestTokenPath, Send-ZuruckReport

@@ -2,14 +2,15 @@
 #
 # Zuruck — restore / recover data from the restic S3 repository
 #
-# Uses the same client env as backup.sh (/etc/restic/env or $RESTIC_ENV_FILE):
+# Uses the same client env as backup.sh ($RESTIC_ENV_FILE, ~/.config/zuruck/env,
+# or /etc/restic/env):
 # repository + RESTIC_PASSWORD_FILE + AWS credentials. All verbs except `restore`
 # are read-only.
 #
 # Usage:
 #   ./scripts/restore.sh list                          # list snapshots (default)
 #   ./scripts/restore.sh browse <id|latest> [PATH]     # list files inside a snapshot
-#   ./scripts/restore.sh mount [MOUNTPOINT]            # browse the repo as a filesystem (needs macFUSE)
+#   ./scripts/restore.sh mount [MOUNTPOINT]            # browse the repo as a filesystem (macFUSE / FUSE)
 #   ./scripts/restore.sh dump  <id|latest> <FILE> [--out FILE]   # extract ONE file
 #   ./scripts/restore.sh restore <id|latest> [options] # restore into a fresh directory
 #         --target DIR        where to write (default ~/zuruck-restore-<timestamp>)
@@ -34,9 +35,13 @@ if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
   echo "ERROR: restore.sh needs bash >= 4; install via 'brew install bash'." >&2; exit 1
 fi
 
-ENV_FILE="${RESTIC_ENV_FILE:-/etc/restic/env}"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+# shellcheck source=zuruck-common.sh
+source "$SCRIPT_DIR/zuruck-common.sh"
+zuruck_add_user_bin_to_path
+ENV_FILE="$(zuruck_resolve_env_file)"
 
-usage() { sed -n '2,32p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+usage() { sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
 
 VERB="${1:-list}"; [[ $# -gt 0 ]] && shift || true
 case "$VERB" in -h|--help|help) usage 0 ;; esac
@@ -75,8 +80,8 @@ case "$VERB" in
     if ! restic help mount >/dev/null 2>&1; then
       echo "ERROR: this restic build has no 'mount' command." >&2; exit 1
     fi
-    # restic mount on macOS needs macFUSE.
-    if ! (command -v mount_macfuse >/dev/null 2>&1 || [[ -e /Library/Filesystems/macfuse.fs ]] || [[ -e /usr/local/lib/libfuse.dylib ]]); then
+    # restic mount on macOS needs macFUSE (Linux uses the kernel's FUSE).
+    if [[ "$(uname)" == "Darwin" ]] && ! (command -v mount_macfuse >/dev/null 2>&1 || [[ -e /Library/Filesystems/macfuse.fs ]] || [[ -e /usr/local/lib/libfuse.dylib ]]); then
       echo "macFUSE is required for 'restic mount' on macOS but was not found."
       echo "  Install it:  brew install --cask macfuse   (then reboot / approve the system extension)"
       echo "  Or browse without mounting:  ./scripts/restore.sh browse latest"

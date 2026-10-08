@@ -8,7 +8,8 @@
     "synth": "cdk synth",
     "diff": "cdk diff",
     "cdk": "cdk",
-    "ui": "node app/zuruck-ui.mjs"
+    "ui": "node app/zuruck-ui.mjs",
+    "test:scripts": "./test/scripts/run-linux.sh && ./test/scripts/run-windows-report.sh"
   },
   "devDependencies": {
     "@types/jest": "^30",
