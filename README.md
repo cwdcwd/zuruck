@@ -253,6 +253,7 @@ see the [Windows Client Setup Guide](docs/windows-setup-guide.md).
 - [Backup Strategy](docs/backup-strategy.md) — Retention policies, cold storage, and restore procedures
 - [Client Setup Guide](docs/client-setup-guide.md) — Step-by-step instructions for macOS/Linux clients
 - [Windows Client Setup Guide](docs/windows-setup-guide.md) — PowerShell client (DPAPI, VSS, Task Scheduler)
+- [User Mode, Root Scope & Reporting](docs/user-mode-setup.md) — sudo-free Linux clients, the owner-installed root-scope grant, and collector status reports
 - [Recovery UI](docs/recovery-ui.md) — Browse snapshots & restore files in a browser (`npm run ui`); cloud-deploy scaffold
 - [Operational Runbook](docs/runbook.md) — Adding/removing clients, emergency restore, key rotation
 - [Architecture Plan](docs/plans/backup-system-plan.md) — Full design document with decisions

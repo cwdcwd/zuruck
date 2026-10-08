@@ -1,0 +1,29 @@
+#!/bin/bash
+#
+# Root-scope hook: consistent pg_dump of the LiteLLM proxy database (it holds
+# the gateway's virtual keys). Run by zuruck-root-backup as root before the
+# backup; writes $ZURUCK_HOOK_OUT/litellm.sql. Set in /etc/zuruck-root/hooks.env:
+#
+#   LITELLM_COMPOSE_DIR=/opt/litellm    # compose project directory
+#   LITELLM_PG_SERVICE=db               # compose service running postgres
+#   LITELLM_PG_USER=llmproxy            # database user
+#   LITELLM_PG_DB=litellm               # database name
+#
+# The three PG settings have no defaults on purpose: a wrong guess would back
+# up the wrong database or nothing. Verify them against docker-compose.yml.
+#
+set -euo pipefail
+: "${ZURUCK_HOOK_OUT:?run by zuruck-root-backup only}"
+: "${LITELLM_COMPOSE_DIR:=/opt/litellm}"
+: "${LITELLM_PG_SERVICE:?set LITELLM_PG_SERVICE in /etc/zuruck-root/hooks.env}"
+: "${LITELLM_PG_USER:?set LITELLM_PG_USER in /etc/zuruck-root/hooks.env}"
+: "${LITELLM_PG_DB:?set LITELLM_PG_DB in /etc/zuruck-root/hooks.env}"
+
+out="$ZURUCK_HOOK_OUT/litellm.sql"
+docker compose --project-directory "$LITELLM_COMPOSE_DIR" exec -T "$LITELLM_PG_SERVICE" \
+  pg_dump -U "$LITELLM_PG_USER" -d "$LITELLM_PG_DB" --no-owner --clean --if-exists >"$out.tmp"
+# pg_dump ends a complete dump with this marker; anything else is truncated.
+tail -n 5 "$out.tmp" | grep -q -- '-- PostgreSQL database dump complete' \
+  || { echo "litellm-pg-dump: dump looks incomplete" >&2; exit 1; }
+mv "$out.tmp" "$out"
+echo "litellm-pg-dump: $(wc -c <"$out") bytes"

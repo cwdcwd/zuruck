@@ -2,19 +2,23 @@
 #
 # Zuruck — backup status
 #
-# Shows local backup health at a glance: whether the launchd schedule is loaded
-# and running, when the last snapshot landed, whether that's within the freshness
+# Shows local backup health at a glance: whether the schedule (launchd on
+# macOS, systemd timer on Linux) is loaded and running, when the last snapshot landed, whether that's within the freshness
 # threshold, repo size, and a recent-snapshot history.
 #
 # Usage:
 #   ./scripts/status.sh                      # colored terminal summary
 #   ./scripts/status.sh --json               # machine-readable JSON
 #   ./scripts/status.sh --html [PATH]        # write a self-contained HTML dashboard
-#                                            # (default ~/Library/Logs/zuruck-status.html)
+#                                            # (default ~/Library/Logs/zuruck-status.html,
+#                                            #  Linux: ~/.local/state/zuruck/status.html)
 #   ./scripts/status.sh --html --open        # write it and open in the browser
-#   ./scripts/status.sh --threshold 12       # freshness window in hours (default 24)
+#   ./scripts/status.sh --threshold 12       # freshness window in hours (default 24,
+#                                            #  or ZURUCK_FRESHNESS_HOURS in the env file)
 #
-# Reads the same client env as backup.sh (/etc/restic/env or $RESTIC_ENV_FILE).
+# Reads the same client env as backup.sh ($RESTIC_ENV_FILE, ~/.config/zuruck/env,
+# or /etc/restic/env). JSON includes per-tag freshness ("scopes"), so a
+# root-scope snapshot (tag "root") is reported separately from user scope.
 # All restic calls are read-only and safe to run during a backup.
 #
 set -euo pipefail
@@ -32,7 +36,7 @@ fi
 MODE="terminal"
 HTML_PATH=""
 OPEN_HTML=false
-THRESHOLD_HOURS="${ZURUCK_FRESHNESS_HOURS:-24}"
+THRESHOLD_HOURS=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -41,24 +45,36 @@ while [[ $# -gt 0 ]]; do
                  if [[ $# -gt 0 && "$1" != --* ]]; then HTML_PATH="$1"; shift; fi ;;
     --open)      OPEN_HTML=true; shift ;;
     --threshold) THRESHOLD_HOURS="$2"; shift 2 ;;
-    -h|--help)   sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help)   sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
     *)           echo "Unknown option: $1" >&2; exit 1 ;;
   esac
 done
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ENV_FILE="${RESTIC_ENV_FILE:-/etc/restic/env}"
+# shellcheck source=zuruck-common.sh
+source "$SCRIPT_DIR/zuruck-common.sh"
+zuruck_add_user_bin_to_path
+ENV_FILE="$(zuruck_resolve_env_file)"
+OS="$(uname)"
 LABEL="com.zuruck.backup"
 DOMAIN="gui/$(id -u)"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-LOG="$HOME/Library/Logs/zuruck-backup.log"
-[[ -z "$HTML_PATH" ]] && HTML_PATH="$HOME/Library/Logs/zuruck-status.html"
+STATE_DIR="$(zuruck_state_dir)"
+if [[ "$OS" == "Darwin" ]]; then
+  LOG="$STATE_DIR/zuruck-backup.log"
+  [[ -z "$HTML_PATH" ]] && HTML_PATH="$STATE_DIR/zuruck-status.html"
+else
+  LOG="$STATE_DIR/backup.log"      # systemd units log to the journal; file only if present
+  [[ -z "$HTML_PATH" ]] && HTML_PATH="$STATE_DIR/status.html"
+fi
 
 # ── Load the client environment ───────────────────────────────────────────
 [[ -r "$ENV_FILE" ]] || { echo "ERROR: cannot read $ENV_FILE — run client-setup.sh first." >&2; exit 1; }
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 : "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY not set in $ENV_FILE}"
+[[ -z "$THRESHOLD_HOURS" ]] && THRESHOLD_HOURS="${ZURUCK_FRESHNESS_HOURS:-24}"
+[[ "$THRESHOLD_HOURS" =~ ^[0-9]+$ && "$THRESHOLD_HOURS" -gt 0 ]] || { echo "ERROR: threshold must be a positive integer (hours)." >&2; exit 1; }
 
 # ── Small helpers ──────────────────────────────────────────────────────────
 human() { awk -v b="${1:-0}" 'BEGIN{u="B KiB MiB GiB TiB PiB";n=split(u,a," ");i=1;while(b>=1024&&i<n){b/=1024;i++}printf((i==1)?"%d %s":"%.2f %s"),b,a[i]}'; }
@@ -66,18 +82,27 @@ fmt_age() { local s=${1:-0}
   if   (( s < 3600 ));  then echo "$((s/60))m ago"
   elif (( s < 86400 )); then echo "$((s/3600))h $(((s%3600)/60))m ago"
   else echo "$((s/86400))d $(((s%86400)/3600))h ago"; fi; }
-# restic emits local ISO8601 (fractional seconds + tz offset); strip both, parse as local.
-iso_to_epoch() {
-  local t; t="$(printf '%s' "$1" | sed -E 's/\.[0-9]+//; s/([+-][0-9]{2}):?[0-9]{2}$//; s/Z$//')"
-  date -j -f "%Y-%m-%dT%H:%M:%S" "$t" +%s 2>/dev/null || echo 0
-}
+iso_to_epoch() { zuruck_iso_to_epoch "$1"; }
 
 NOW_EPOCH="$(date +%s)"
 GENERATED="$(date '+%Y-%m-%d %H:%M:%S %Z')"
 
-# ── Schedule state (launchd) ───────────────────────────────────────────────
-SCHED_LOADED="no"; SCHED_PID=""; SCHED_LAST_EXIT=""; EVERY_HOURS=""
-if PRINT="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null)"; then
+# ── Schedule state (launchd on macOS, systemd timer on Linux) ──────────────
+SCHED_LOADED="no"; SCHED_PID=""; SCHED_LAST_EXIT=""; EVERY_HOURS=""; SCHED_KIND=""
+if [[ "$OS" != "Darwin" ]] && command -v systemctl >/dev/null 2>&1; then
+  # User-mode unit first (client-setup.sh --user-mode), then the system unit.
+  for scope in --user --system; do
+    case "$scope" in --user) unit=zuruck-backup ;; *) unit=restic-backup ;; esac
+    if systemctl "$scope" is-enabled "$unit.timer" >/dev/null 2>&1; then
+      SCHED_LOADED="yes"; SCHED_KIND="systemd${scope/--/-}:$unit.timer"
+      SCHED_LAST_EXIT="$(systemctl "$scope" show "$unit.service" -p ExecMainStatus --value 2>/dev/null || true)"
+      SCHED_PID="$(systemctl "$scope" show "$unit.service" -p MainPID --value 2>/dev/null || true)"
+      [[ "$SCHED_PID" == 0 ]] && SCHED_PID=""
+      break
+    fi
+  done
+elif PRINT="$(launchctl print "$DOMAIN/$LABEL" 2>/dev/null)"; then
+  SCHED_KIND="launchd:$LABEL"
   SCHED_LOADED="yes"
   SCHED_PID="$(printf '%s\n' "$PRINT" | awk -F'= ' '/^[[:space:]]*pid =/{print $2; exit}')"
   SCHED_LAST_EXIT="$(printf '%s\n' "$PRINT" | awk -F'= ' '/last exit code =/{print $2; exit}')"
@@ -126,6 +151,22 @@ elif (( SNAP_COUNT == 0 )); then VERDICT="none"
 elif [[ -n "$LATEST_AGE_SECS" ]] && (( LATEST_AGE_SECS <= THRESHOLD_HOURS * 3600 )); then VERDICT="fresh"
 else VERDICT="stale"; fi
 
+# Per-scope freshness: snapshots tagged "root" come from the root-scope wrapper
+# (zuruck-root-backup); everything else is user scope.
+scope_latest() {  # $1 = root|user → prints the newest snapshot time or nothing
+  printf '%s' "$SNAP_JSON" | jq -r --arg s "$1" '
+    [ .[] | select(((.tags // []) | index("root")) as $r | if $s == "root" then $r != null else $r == null end) ]
+    | if length == 0 then empty else (max_by(.time) | .time) end'
+}
+scope_age() { local iso="$1" e; [[ -z "$iso" ]] && return 0; e="$(iso_to_epoch "$iso")"; (( e > 0 )) && echo $(( NOW_EPOCH - e )); return 0; }
+USER_LATEST_ISO="$(scope_latest user)"; ROOT_LATEST_ISO="$(scope_latest root)"
+USER_AGE="$(scope_age "$USER_LATEST_ISO")"; ROOT_AGE="$(scope_age "$ROOT_LATEST_ISO")"
+# Written by the root wrapper after each run; world-readable, no secrets.
+ROOT_LAST_RUN='null'
+if [[ -r /var/lib/zuruck-root/last-run.json ]]; then
+  ROOT_LAST_RUN="$(jq -c . /var/lib/zuruck-root/last-run.json 2>/dev/null || echo null)"
+fi
+
 # ── JSON output ────────────────────────────────────────────────────────────
 nn() { [[ "${1:-}" =~ ^-?[0-9]+$ ]] && printf '%s' "$1" || printf 'null'; }  # integer-or-null for --argjson
 build_json() {
@@ -145,18 +186,33 @@ build_json() {
     --arg latestiso "${LATEST_ISO:-}" \
     --argjson lateage "$(nn "${LATEST_AGE_SECS:-}")" \
     --argjson stored "$REPO_STORED" \
-    --argjson blobs "$REPO_BLOBS" '
+    --argjson blobs "$REPO_BLOBS" \
+    --arg host "$(hostname)" \
+    --arg client "$(zuruck_client_name)" \
+    --arg schedkind "${SCHED_KIND:-}" \
+    --arg userlatest "${USER_LATEST_ISO:-}" \
+    --argjson userage "$(nn "${USER_AGE:-}")" \
+    --arg rootlatest "${ROOT_LATEST_ISO:-}" \
+    --argjson rootage "$(nn "${ROOT_AGE:-}")" \
+    --argjson rootrun "$ROOT_LAST_RUN" '
+    def scope($t; $a): if $t == "" then null else
+      { time: $t, age_seconds: $a,
+        fresh: (if $a == null then null else ($a <= ($threshold * 3600)) end) } end;
     {
       generated_at: $generated,
+      host: $host,
+      client: $client,
       repository: $repo,
       verdict: $verdict,
       threshold_hours: $threshold,
-      schedule: { loaded: ($loaded=="yes"), every_hours: $every,
+      schedule: { loaded: ($loaded=="yes"), kind: (if $schedkind=="" then null else $schedkind end), every_hours: $every,
                   times: (if $schedtimes=="" then [] else ($schedtimes|split(" ")) end),
                   pid: $schedpid, last_exit_code: $lastexit },
       running: ($running=="yes"),
       running_pids: (if $pids=="" then [] else ($pids|split(",")) end),
       latest: (if $latestid=="" then null else { short_id: $latestid, time: $latestiso, age_seconds: $lateage } end),
+      scopes: { user: scope($userlatest; $userage), root: scope($rootlatest; $rootage) },
+      root_last_run: $rootrun,
       repo: { stored_bytes: $stored, blob_count: $blobs, snapshot_count: (. | length) },
       snapshots: [ .[] | {
         short_id, time, tags: (.tags // []),

@@ -2,6 +2,8 @@
 
 This guide walks you through setting up a client machine to back up to the Zuruck S3 backup system using restic.
 
+> **Linux without sudo?** `scripts/client-setup.sh --user-mode` sets up a client that runs entirely as an unprivileged user, with an optional owner-installed grant for root-owned paths and status reporting to a collector. See [User Mode, Root Scope & Reporting](user-mode-setup.md).
+
 ## Prerequisites
 
 - A client entry has been added to `lib/config/clients.ts` and deployed via CDK
