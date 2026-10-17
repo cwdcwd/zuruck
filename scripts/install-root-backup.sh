@@ -117,6 +117,21 @@ read_user_var() { ( set +u; # shellcheck disable=SC1091
 REPO="$(read_user_var RESTIC_REPOSITORY)"
 AKID="$(read_user_var AWS_ACCESS_KEY_ID)"
 SAK="$(read_user_var AWS_SECRET_ACCESS_KEY)"
+# --encrypt-creds user installs keep the AWS secret out of plaintext env:
+# ZURUCK_AWS_CRED_FILE points at a user-scoped systemd-creds credential that
+# root can decrypt on the target user's behalf (--uid), never the reverse.
+if [[ -z "$SAK" ]]; then
+  USER_CRED_FILE="$(read_user_var ZURUCK_AWS_CRED_FILE)"
+  if [[ -n "$USER_CRED_FILE" ]]; then
+    [[ -r "$USER_CRED_FILE" ]] || die "ZURUCK_AWS_CRED_FILE=$USER_CRED_FILE not readable (wrong user?)."
+    command -v systemd-creds &>/dev/null || die "user env encrypts its AWS secret (--encrypt-creds) but systemd-creds is missing."
+    SAK="$(systemd-creds decrypt --user --uid="$TARGET_USER" --name=AWS_SECRET_ACCESS_KEY "$USER_CRED_FILE" 2>/dev/null \
+        || systemd-creds decrypt --user --name=AWS_SECRET_ACCESS_KEY "$USER_CRED_FILE" 2>/dev/null \
+        || true)"
+    [[ -n "$SAK" ]] || die "could not decrypt $USER_CRED_FILE for $TARGET_USER. As root run: systemd-creds decrypt --user --uid=$TARGET_USER --name=AWS_SECRET_ACCESS_KEY $USER_CRED_FILE"
+    info "AWS secret decrypted from $USER_CRED_FILE (user ran client-setup.sh --encrypt-creds)."
+  fi
+fi
 [[ "$REPO" =~ ^(s3:[A-Za-z0-9./:-]+|/[A-Za-z0-9._/-]+)$ ]] || die "unexpected RESTIC_REPOSITORY in $USER_CONF/env"
 [[ "$AKID" =~ ^[A-Z0-9]+$ ]] || die "unexpected AWS_ACCESS_KEY_ID in $USER_CONF/env"
 [[ "$SAK" =~ ^[A-Za-z0-9/+=]+$ ]] || die "unexpected AWS_SECRET_ACCESS_KEY in $USER_CONF/env"

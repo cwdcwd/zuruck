@@ -60,6 +60,23 @@ case "$1" in version) echo "restic 0.0.0-stub";; *) exit 1;; esac
 EOF
 chmod 755 "$UH/.local/bin/restic"; chown "$U:$U" "$UH/.local/bin/restic"
 
+# systemd-creds stub: "encrypt" = base64, "decrypt" = base64 -d. Alice gets a
+# copy on her PATH (stubs dir); root's copy sits in /usr/local/bin for
+# owner-side decrypts (install-root-backup.sh). The real binary can't be used:
+# the container has no systemd, and 252 lacks user-scoped keys.
+cat >"$UH/stubs/systemd-creds" <<EOF
+#!/bin/bash
+echo "systemd-creds \$*" >>"$UH/stub-calls.log"
+case "\$1" in
+  encrypt) base64 -w0 "\${@: -2:1}" >"\${@: -1:1}" ;;
+  decrypt) base64 -d "\${@: -1:1}" ;;
+  *) exit 1 ;;
+esac
+EOF
+chmod 755 "$UH/stubs/systemd-creds"; chown "$U:$U" "$UH/stubs/systemd-creds"
+sed "s|$UH/stub-calls.log|/tmp/stub-creds-calls.log|" "$UH/stubs/systemd-creds" >/usr/local/bin/systemd-creds
+chmod 755 /usr/local/bin/systemd-creds
+
 echo "[$SECONDS s] == client-setup.sh --user-mode"
 check "refuses --secret-access-key in user mode" \
   bash -c "! sudo -u $U -H $SRC/scripts/client-setup.sh --user-mode --client-name test-abc123 --bucket b --access-key-id AKIATEST --secret-access-key x >/dev/null 2>&1"
@@ -99,6 +116,50 @@ cat >>"$C/env" <<'EOF'
 export ZURUCK_ROOT_BACKUP=1
 export ZURUCK_FRESHNESS_HOURS=12
 EOF
+
+echo "[$SECONDS s] == user unit file contents and flags"
+check "timer OnCalendar every 4h"  grep -q '^OnCalendar=\*-\*-\* 00/4:00:00' "$UH/.config/systemd/user/zuruck-backup.timer"
+check "timer Persistent=true"      grep -q '^Persistent=true' "$UH/.config/systemd/user/zuruck-backup.timer"
+check "timer WantedBy timers"      grep -q '^WantedBy=timers.target' "$UH/.config/systemd/user/zuruck-backup.timer"
+check "service oneshot"            grep -q '^Type=oneshot' "$UH/.config/systemd/user/zuruck-backup.service"
+check "service env points at env"  grep -q "Environment=\"RESTIC_ENV_FILE=$C/env\"" "$UH/.config/systemd/user/zuruck-backup.service"
+check "service PATH has user bin"  grep -q "Environment=\"PATH=$UH/.local/bin:" "$UH/.config/systemd/user/zuruck-backup.service"
+check "unknown option rejected" \
+  bash -c "! SECRET_ACCESS_KEY=abc sudo -u $U -H $SRC/scripts/client-setup.sh --user-mode --client-name test-abc123 --bucket b --access-key-id AKIATEST --definitely-not-a-flag >/dev/null 2>&1"
+check "user-mode --install-restic needs pinned version" \
+  bash -c "! PATH=/usr/sbin:/sbin sudo -u $U -H env -u RESTIC_ENV_FILE $SRC/scripts/client-setup.sh --user-mode --client-name test-abc123 --bucket b --access-key-id AKIATEST --install-restic >/dev/null 2>&1"
+check "system mode refuses --encrypt-creds" \
+  bash -c "! SECRET_ACCESS_KEY=abc $SRC/scripts/client-setup.sh --client-name test-abc123 --bucket b --access-key-id AKIATEST --encrypt-creds >/dev/null 2>&1"
+check "system-mode refusal left /etc/restic untouched" test ! -e /etc/restic
+check "--encrypt-creds without systemd-creds refuses" \
+  bash -c "! PATH=/bin:/usr/bin sudo -u $U -H env -u RESTIC_ENV_FILE XDG_CONFIG_HOME=$UH/.cfg-nocreds $SRC/scripts/client-setup.sh --user-mode --encrypt-creds --client-name test-abc123 --bucket b --access-key-id AKIATEST >/dev/null 2>&1"
+check "refused setup wrote no env file" test ! -e "$UH/.cfg-nocreds/zuruck/env"
+
+# --install-path: a stub restic somewhere custom must be picked up over the
+# one on the system PATH, and end up first in the unit's PATH line.
+mkdir -p "$UH/tools"
+cat >"$UH/tools/restic" <<'EOF'
+#!/bin/sh
+case "$1" in version) echo "restic 0.0.0-stub";; *) exit 1;; esac
+EOF
+chmod 755 "$UH/tools/restic"; chown "$U:$U" "$UH/tools/restic"
+as_user env PATH="$UH/stubs:/usr/bin:/bin" XDG_CONFIG_HOME="$UH/.cfg-ip" SECRET_ACCESS_KEY='wJalrXUtnFEMI/K7MDENGbPxRfiCYEXAMPLEKEY' \
+  "$SRC/scripts/client-setup.sh" --user-mode --client-name test-abc123 --bucket zuruck-backup-test \
+  --access-key-id AKIATESTKEY --install-path "$UH/tools" >/tmp/setup-ip.log 2>&1 \
+  || { cat /tmp/setup-ip.log; bad "client-setup with --install-path ran"; }
+check "install-path stub restic is preferred" test "$(grep -o '(.*restic)' /tmp/setup-ip.log | tail -1 | tr -d '()')" = "$UH/tools/restic"
+check "isolated config written under XDG dir" test -f "$UH/.cfg-ip/zuruck/env"
+check "install-path first in unit PATH line" grep -q "Environment=\"PATH=$UH/tools:" "$UH/.cfg-ip/systemd/user/zuruck-backup.service"
+rm -rf "$UH/.cfg-ip"
+
+# --no-timer: config written, no units.
+as_user env PATH="$UH/stubs:/usr/bin:/bin" XDG_CONFIG_HOME="$UH/.cfg-nt" SECRET_ACCESS_KEY='wJalrXUtnFEMI/K7MDENGbPxRfiCYEXAMPLEKEY' \
+  "$SRC/scripts/client-setup.sh" --user-mode --client-name test-abc123 --bucket zuruck-backup-test \
+  --access-key-id AKIATESTKEY --no-timer >/tmp/setup-nt.log 2>&1 \
+  || { cat /tmp/setup-nt.log; bad "client-setup with --no-timer ran"; }
+check "--no-timer wrote config" test -f "$UH/.cfg-nt/zuruck/env"
+check "--no-timer wrote no units" test ! -e "$UH/.cfg-nt/systemd/user/zuruck-backup.service"
+rm -rf "$UH/.cfg-nt"
 
 echo "[$SECONDS s] == backup.sh (user scope, local repo, real restic)"
 rm -f "$UH/.local/bin/restic"
@@ -187,6 +248,46 @@ RESTORE_DIR=/root/root-restore
 RESTIC_ENV_FILE=/etc/zuruck-root/env "$SRC/scripts/restore.sh" restore latest --tag root --target "$RESTORE_DIR" --yes >/dev/null 2>&1 \
   || RESTIC_ENV_FILE=/etc/zuruck-root/env bash -c "source /etc/zuruck-root/env; /usr/local/sbin/restic-zuruck restore latest --tag root --target $RESTORE_DIR >/dev/null"
 check "owner can restore root file" test "$(cat $RESTORE_DIR/srv/rootdata/app.conf 2>/dev/null)" = secret-config
+
+echo "[$SECONDS s] == --encrypt-creds (systemd-creds)"
+: >/tmp/ingest.log
+as_user env PATH="$UH/stubs:/usr/bin:/bin" SECRET_ACCESS_KEY='wJalrXUtnFEMI/K7MDENGbPxRfiCYEXAMPLEKEY' ZURUCK_INGEST_TOKEN='tok-123' \
+  "$SRC/scripts/client-setup.sh" --user-mode --encrypt-creds --client-name test-abc123 --bucket zuruck-backup-test \
+  --access-key-id AKIATESTKEY --root-backup --freshness-hours 12 \
+  --ingest-url http://127.0.0.1:18790/api/ingest --no-timer >/tmp/setup-enc.log 2>&1 \
+  || { cat /tmp/setup-enc.log; bad "encrypted re-setup ran"; }
+check "env has no plaintext AWS secret" bash -c "! grep -q '^export AWS_SECRET_ACCESS_KEY' $C/env"
+check "env points at aws.cred"          grep -q "export ZURUCK_AWS_CRED_FILE=\"$C/aws.cred\"" "$C/env"
+check "aws.cred is 0600"                test "$(stat -c %a "$C/aws.cred")" = 600
+check "aws.cred holds stub-encrypted secret" \
+  test "$(cat "$C/aws.cred")" = "$(printf '%s' 'wJalrXUtnFEMI/K7MDENGbPxRfiCYEXAMPLEKEY' | base64 -w0)"
+check "secret absent from encrypted setup output" bash -c "! grep -q wJalrXUtnFEMI /tmp/setup-enc.log"
+check "helper decrypts to the original secret" \
+  as_user env PATH="$UH/stubs:/usr/bin:/bin" bash -c "source $SRC/scripts/zuruck-common.sh && source $C/env && zuruck_decrypt_aws_secret && test \"\$AWS_SECRET_ACCESS_KEY\" = 'wJalrXUtnFEMI/K7MDENGbPxRfiCYEXAMPLEKEY'"
+check "helper fails loudly without systemd-creds" \
+  as_user env PATH=/bin:/usr/bin bash -c "source $SRC/scripts/zuruck-common.sh && source $C/env && ! zuruck_decrypt_aws_secret"
+
+# Full run with encrypted credentials: point the repo back at the local backend.
+# (PATH is pinned so the helper decrypt goes through Alice's stub, not
+# /usr/local/bin's copy — sudo's secure_path puts the system copy first.)
+sed -i "s|^export RESTIC_REPOSITORY=.*|export RESTIC_REPOSITORY=\"$REPO/test-abc123\"|" "$C/env"
+as_user env PATH="$UH/stubs:/usr/bin:/bin" timeout 300 "$SRC/scripts/backup.sh" --tag encrypted >/tmp/backup3.log 2>&1 \
+  || { cat /tmp/backup3.log; bad "backup with encrypted creds ran"; }
+check "encrypted-creds backup reported exit 0" bash -c "tail -1 /tmp/ingest.log | jq -e '.body.report.exit_code == 0' >/dev/null"
+check "backup decrypted via systemd-creds"     grep -q 'systemd-creds decrypt --user' "$UH/stub-calls.log"
+
+# Owner side: the root-scope installer must pull the secret out of the encrypted file.
+"$SRC/scripts/install-root-backup.sh" --user "$U" --path /srv/rootdata --restic-binary "$(command -v restic)" >/tmp/install-enc.log 2>&1 \
+  || { cat /tmp/install-enc.log; bad "install-root-backup with encrypted user creds ran"; }
+check "owner installer decrypted the user secret" grep -q 'AWS secret decrypted' /tmp/install-enc.log
+check "installer decrypt used --uid for user scope" grep -q -- "--uid=$U" /tmp/stub-creds-calls.log
+check "root env carries the plaintext secret" bash -c "grep -q wJalrXUtnFEMI /etc/zuruck-root/env"
+set +e
+sudo -u "$U" sudo -n /usr/local/sbin/zuruck-root-backup >/tmp/root2.log 2>&1
+RRC2=$?
+set -e
+check "root scope runs after re-install" test "$RRC2" -eq 0
+check "root run healthy" jq -e '.exit_code == 0' /var/lib/zuruck-root/last-run.json >/dev/null
 
 echo "[$SECONDS s] == uninstall"
 "$SRC/scripts/install-root-backup.sh" --user "$U" --uninstall >/dev/null

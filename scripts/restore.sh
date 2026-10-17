@@ -51,6 +51,8 @@ case "$VERB" in -h|--help|help) usage 0 ;; esac
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 : "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY not set in $ENV_FILE}"
+# --encrypt-creds installs: the AWS secret comes from systemd-creds, not the env file.
+zuruck_decrypt_aws_secret || exit 1
 
 # Parse the S3 repo URL into bucket/prefix/region (for the Glacier stage path).
 # Form: s3:s3.<region>.amazonaws.com/<bucket>/<prefix>

@@ -52,6 +52,7 @@ INGEST_URL=""
 ROOT_BACKUP=false
 FRESHNESS_HOURS=""
 NO_TIMER=false
+ENCRYPT_CREDS=false
 
 usage() {
   cat <<EOF
@@ -74,6 +75,11 @@ Mode:
                              ~/.local/bin, systemd user timer (Linux)
   --install-path DIR         Where to install restic (default: ~/.local/bin in
                              user mode, /usr/local/bin in system mode)
+  --encrypt-creds            (user mode) Keep the AWS secret out of the env
+                             file and store it instead in <config>/aws.cred,
+                             encrypted with systemd-creds (user-scoped key:
+                             decrypted only by this user on this machine);
+                             requires systemd-creds on PATH
 
 Optional:
   --region REGION            AWS region (default: us-west-2)
@@ -123,6 +129,7 @@ while [[ $# -gt 0 ]]; do
     --restic-sha256)    RESTIC_SHA256="$2"; shift 2 ;;
     --user-mode)        USER_MODE=true; shift ;;
     --install-path)     INSTALL_PATH="$2"; shift 2 ;;
+    --encrypt-creds)    ENCRYPT_CREDS=true; shift ;;
     --ingest-url)       INGEST_URL="$2"; shift 2 ;;
     --root-backup)      ROOT_BACKUP=true; shift ;;
     --freshness-hours)  FRESHNESS_HOURS="$2"; shift 2 ;;
@@ -161,6 +168,7 @@ if $USER_MODE; then
   [[ -z "$INSTALL_PATH" ]] && INSTALL_PATH="$HOME/.local/bin"
 else
   $ROOT_BACKUP && error "--root-backup is a user-mode option (system mode already runs as root)."
+  $ENCRYPT_CREDS && error "--encrypt-creds is only supported in --user-mode (system mode is root-shaped: the /etc/restic/env file is already root-only at 0600; owners encrypt it manually — see docs/client-setup-guide.md)."
   SUDO=(sudo)
   CONF_DIR="/etc/restic"
   [[ -z "$INSTALL_PATH" ]] && INSTALL_PATH="/usr/local/bin"
@@ -336,11 +344,42 @@ else
   info "Client password saved to ${PASSWORD_FILE}"
 fi
 
+# ── Optional: encrypt the AWS secret (systemd-creds, user mode) ─────────
+# --encrypt-creds removes the plaintext AWS secret from the env file and
+# stores it in <config dir>/aws.cred, encrypted with systemd-creds using a
+# user-scoped key: decryptable only by this user on this machine (and by the
+# owner, e.g. when install-root-backup.sh copies it into /etc/zuruck-root).
+# Runtime scripts call zuruck_decrypt_aws_secret() from zuruck-common.sh.
+AWS_CRED_FILE=""
+if $USER_MODE && $ENCRYPT_CREDS; then
+  info "Encrypting the AWS secret with systemd-creds (user-scoped)..."
+  command -v systemd-creds &>/dev/null || \
+    error "--encrypt-creds needs systemd-creds on PATH. Without it, re-run without --encrypt-creds (the env file keeps the plaintext secret, root-only-readable at 0600)."
+  AWS_CRED_FILE="$CONF_DIR/aws.cred"
+  PLAINTEXT_TMP=$(mktemp)
+  ( umask 077; printf '%s' "${SECRET_ACCESS_KEY}" >"$PLAINTEXT_TMP" )
+  # --user scopes the key to the unprivileged account (systemd >= 254; older
+  # systemds lack the flag and cannot encrypt without a root-provisioned key).
+  if ! systemd-creds encrypt --user --name=AWS_SECRET_ACCESS_KEY \
+        "$PLAINTEXT_TMP" "$AWS_CRED_FILE"; then
+    rm -f "$PLAINTEXT_TMP"
+    error "systemd-creds encrypt failed. User-scoped encryption needs systemd >= 254 with the '--user' flag, or a pre-provisioned user key. Re-run without --encrypt-creds to keep the plaintext secret in the env file instead."
+  fi
+  rm -f "$PLAINTEXT_TMP"
+  chmod 600 "$AWS_CRED_FILE"   # explicit mode, independent of the caller's umask
+  info "AWS secret encrypted to ${AWS_CRED_FILE}"
+fi
+
 # ── Create environment file ─────────────────────────────────────────────
 info "Creating ${ENV_FILE}..."
 {
   printf 'export AWS_ACCESS_KEY_ID="%s"\n' "${ACCESS_KEY_ID}"
-  printf 'export AWS_SECRET_ACCESS_KEY="%s"\n' "${SECRET_ACCESS_KEY}"
+  if [[ -n "$AWS_CRED_FILE" ]]; then
+    # The plaintext secret stays out of the env file entirely.
+    printf 'export ZURUCK_AWS_CRED_FILE="%s"\n' "${AWS_CRED_FILE}"
+  else
+    printf 'export AWS_SECRET_ACCESS_KEY="%s"\n' "${SECRET_ACCESS_KEY}"
+  fi
   printf 'export RESTIC_REPOSITORY="%s"\n' "s3:s3.${REGION}.amazonaws.com/${BUCKET_NAME}/${CLIENT_NAME}"
   printf 'export RESTIC_PASSWORD_FILE="%s"\n' "${PASSWORD_FILE}"
   [[ -n "$INGEST_URL" ]] && printf 'export ZURUCK_INGEST_URL="%s"\n' "$INGEST_URL"
@@ -348,6 +387,11 @@ info "Creating ${ENV_FILE}..."
   [[ -n "$FRESHNESS_HOURS" ]] && printf 'export ZURUCK_FRESHNESS_HOURS=%s\n' "$FRESHNESS_HOURS"
   true
 } | write_secret_file "$ENV_FILE"
+if [[ -n "$AWS_CRED_FILE" ]]; then
+  # Encrypted copies are the only remaining plaintext-free copy of the
+  # secret in user mode; drop the plaintext from this run's environment.
+  unset SECRET_ACCESS_KEY
+fi
 info "Environment file saved to ${ENV_FILE}"
 
 if [[ -n "$INGEST_URL" ]]; then
