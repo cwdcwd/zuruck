@@ -358,12 +358,13 @@ if $USER_MODE && $ENCRYPT_CREDS; then
   AWS_CRED_FILE="$CONF_DIR/aws.cred"
   PLAINTEXT_TMP=$(mktemp)
   ( umask 077; printf '%s' "${SECRET_ACCESS_KEY}" >"$PLAINTEXT_TMP" )
-  # --user scopes the key to the unprivileged account (systemd >= 254; older
-  # systemds lack the flag and cannot encrypt without a root-provisioned key).
+  # --user scopes the key to the unprivileged account (systemd >= 256; the
+  # --user/--uid= options shipped in v256 - older systemds lack them and
+  # cannot encrypt without a root-provisioned key).
   if ! systemd-creds encrypt --user --name=AWS_SECRET_ACCESS_KEY \
         "$PLAINTEXT_TMP" "$AWS_CRED_FILE"; then
     rm -f "$PLAINTEXT_TMP"
-    error "systemd-creds encrypt failed. User-scoped encryption needs systemd >= 254 with the '--user' flag, or a pre-provisioned user key. Re-run without --encrypt-creds to keep the plaintext secret in the env file instead."
+    error "systemd-creds encrypt failed. User-scoped encryption needs systemd >= 256 with the '--user' flag, or a pre-provisioned user key. Re-run without --encrypt-creds to keep the plaintext secret in the env file instead."
   fi
   rm -f "$PLAINTEXT_TMP"
   chmod 600 "$AWS_CRED_FILE"   # explicit mode, independent of the caller's umask

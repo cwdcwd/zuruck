@@ -73,8 +73,11 @@ setup output prints the exact commands), and run a first backup:
 Without it, the env file holds the secret access key in cleartext (0600, but a
 filesystem snapshot or careless `cat` still exposes it). With the flag, setup
 encrypts the secret into `~/.config/zuruck/aws.cred` with `systemd-creds` and
-a **user-scoped** key: the file is meaningless to anyone else on the machine
-and on any other machine. The env file then carries only
+a **user-scoped** key: it defeats other *unprivileged* local users and
+copied snapshots (they get ciphertext only). It is **not** a boundary
+against root or a compromised host — root can decrypt user-scoped
+credentials, and this repo's `install-root-backup.sh --uid` flow does
+exactly that (see [Root scope](#root-scope)). The env file then carries only
 
 ```
 export ZURUCK_AWS_CRED_FILE="/home/<user>/.config/zuruck/aws.cred"
@@ -86,9 +89,10 @@ process argument list.
 
 Requirements and edge cases:
 
-- Needs `systemd-creds` on PATH and systemd new enough for user-scoped keys
-  (`--user`, since ~254; the fleet hosts' ≥252 without it can't encrypt as an
-  unprivileged user — setup refuses rather than fall back to plaintext).
+- Needs `systemd-creds` on PATH and systemd **≥256** for user-scoped keys
+  (`--user`/`--uid=` shipped in v256 — the 255 man page has neither; fleet
+  baseline hosts run 252, where `--encrypt-creds` cannot work and setup
+  refuses rather than fall back to plaintext).
 - Rotating the key: re-run setup with the new secret (same command) — it
   re-encrypts `aws.cred` and rewrites the env file.
 - Dropping encryption: re-run setup without `--encrypt-creds`.
