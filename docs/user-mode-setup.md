@@ -24,6 +24,7 @@ before. Every script finds its config the same way:
 | Client restic password | `~/.config/zuruck/password` | 0600 |
 | Paths to back up | `~/.config/zuruck/include` | 0600 |
 | Ingest token (if reporting) | `~/.config/zuruck/ingest-token` | 0600 |
+| Encrypted AWS secret (--encrypt-creds) | `~/.config/zuruck/aws.cred` | 0600 |
 | restic binary | `~/.local/bin/restic` | 0755 |
 | systemd user units | `~/.config/systemd/user/zuruck-backup.{service,timer}` | |
 
@@ -52,6 +53,9 @@ export ZURUCK_INGEST_TOKEN='<from the collector>'   # only with --ingest-url
 unset SECRET_ACCESS_KEY ZURUCK_INGEST_TOKEN
 ```
 
+Add `--encrypt-creds` to the same command line to keep the AWS secret out of
+the env file — see the next section.
+
 User mode can't use apt, so `--install-restic` needs a pinned version and its
 SHA256 from the [restic releases page](https://github.com/restic/restic/releases).
 Re-running setup is safe: it keeps the existing client password, so an
@@ -63,6 +67,37 @@ setup output prints the exact commands), and run a first backup:
 ```bash
 ~/zuruck/scripts/backup.sh --tag first
 ```
+
+### No plaintext AWS secret (`--encrypt-creds`)
+
+Without it, the env file holds the secret access key in cleartext (0600, but a
+filesystem snapshot or careless `cat` still exposes it). With the flag, setup
+encrypts the secret into `~/.config/zuruck/aws.cred` with `systemd-creds` and
+a **user-scoped** key: it defeats other *unprivileged* local users and
+copied snapshots (they get ciphertext only). It is **not** a boundary
+against root or a compromised host — root can decrypt user-scoped
+credentials, and this repo's `install-root-backup.sh --uid` flow does
+exactly that (see [Root scope](#root-scope)). The env file then carries only
+
+```
+export ZURUCK_AWS_CRED_FILE="/home/<user>/.config/zuruck/aws.cred"
+```
+
+and `backup.sh`, `status.sh` and `restore.sh` decrypt it at startup, so there
+is nothing to wire into the systemd units. The secret never appears in a
+process argument list.
+
+Requirements and edge cases:
+
+- Needs `systemd-creds` on PATH and systemd **≥256** for user-scoped keys
+  (`--user`/`--uid=` shipped in v256 — the 255 man page has neither; fleet
+  baseline hosts run 252, where `--encrypt-creds` cannot work and setup
+  refuses rather than fall back to plaintext).
+- Rotating the key: re-run setup with the new secret (same command) — it
+  re-encrypts `aws.cred` and rewrites the env file.
+- Dropping encryption: re-run setup without `--encrypt-creds`.
+- The [root scope](#root-scope) installer (`install-root-backup.sh`) knows
+  about `aws.cred` and decrypts it as root for the copied root config.
 
 ### Lingering
 

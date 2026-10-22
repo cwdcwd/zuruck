@@ -25,6 +25,41 @@ zuruck_resolve_env_file() {
   printf '%s\n' /etc/restic/env
 }
 
+# Decrypt the AWS secret from systemd-creds storage (client-setup.sh
+# --encrypt-creds). The env file then carries ZURUCK_AWS_CRED_FILE=<config>/aws.cred instead of
+# a plaintext AWS_SECRET_ACCESS_KEY. The .cred file is encrypted with a
+# user-scoped key, so the same user on the same machine can decrypt it —
+# whether from a plain shell or from their systemd user service. Idempotent:
+# an already-set AWS_SECRET_ACCESS_KEY (e.g. exported by the caller) wins.
+# Returns non-zero when a credential file is configured but cannot be
+# decrypted, so callers fail loudly instead of hitting S3 with no secret.
+zuruck_decrypt_aws_secret() {
+  if [[ -n "${AWS_SECRET_ACCESS_KEY:-}" ]]; then
+    return 0
+  fi
+  if [[ -z "${ZURUCK_AWS_CRED_FILE:-}" ]]; then
+    return 0
+  fi
+  if ! command -v systemd-creds &>/dev/null; then
+    echo "ERROR: ZURUCK_AWS_CRED_FILE=${ZURUCK_AWS_CRED_FILE} is set but systemd-creds is not on PATH" \
+         "(the env file carries an encrypted secret; re-run client-setup.sh without --encrypt-creds or install systemd-creds)." >&2
+    return 1
+  fi
+  if [[ ! -r "${ZURUCK_AWS_CRED_FILE}" ]]; then
+    echo "ERROR: ZURUCK_AWS_CRED_FILE=${ZURUCK_AWS_CRED_FILE} is set but not readable." >&2
+    return 1
+  fi
+  if ! AWS_SECRET_ACCESS_KEY="$(systemd-creds decrypt --user --name=AWS_SECRET_ACCESS_KEY "${ZURUCK_AWS_CRED_FILE}")"; then
+    echo "ERROR: systemd-creds decrypt failed for ${ZURUCK_AWS_CRED_FILE} (user-scoped key not decryptable by $(id -un)?)." >&2
+    return 1
+  fi
+  if [[ -z "${AWS_SECRET_ACCESS_KEY}" ]]; then
+    echo "ERROR: decrypted AWS secret from ${ZURUCK_AWS_CRED_FILE} is empty." >&2
+    return 1
+  fi
+  export AWS_SECRET_ACCESS_KEY
+}
+
 # Where logs and the generated HTML status page go.
 zuruck_state_dir() {
   if [[ "$(uname)" == "Darwin" ]]; then

@@ -324,6 +324,14 @@ ExecStartPre=/bin/sh -c 'export AWS_SECRET_ACCESS_KEY=$(cat $CREDENTIALS_DIRECTO
 Now the secret is decryptable only by this service when systemd has unlocked
 the host (TPM-bound on most modern Linux installs).
 
+#### Linux user mode (`--encrypt-creds`)
+
+Unprivileged user-mode clients don't need the manual unit surgery above.
+`--user-mode --encrypt-creds` encrypts the secret into
+`~/.config/zuruck/aws.cred` with a user-scoped `systemd-creds` key and keeps
+the plaintext out of the env file; backup.sh, status.sh and restore.sh decrypt
+it at startup. See [user-mode-setup.md](./user-mode-setup.md).
+
 #### macOS (Keychain)
 
 ```bash

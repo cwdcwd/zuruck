@@ -91,6 +91,10 @@ on_exit() {
 }
 trap on_exit EXIT
 
+# --encrypt-creds installs: the AWS secret comes from systemd-creds, not the env file.
+# (After the trap, so a broken credential still produces a failure report.)
+zuruck_decrypt_aws_secret || exit 1
+
 # ── Keep the Mac awake for the whole backup ───────────────────────────────
 # A laptop that idle-sleeps mid-backup tears down the GUI launchd session and
 # SIGTERMs the job: observed on 2026-07-24 — restic was killed at ~2h with exit

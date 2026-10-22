@@ -73,6 +73,8 @@ fi
 # shellcheck disable=SC1090
 source "$ENV_FILE"
 : "${RESTIC_REPOSITORY:?RESTIC_REPOSITORY not set in $ENV_FILE}"
+# --encrypt-creds installs: the AWS secret comes from systemd-creds, not the env file.
+zuruck_decrypt_aws_secret || exit 1
 [[ -z "$THRESHOLD_HOURS" ]] && THRESHOLD_HOURS="${ZURUCK_FRESHNESS_HOURS:-24}"
 [[ "$THRESHOLD_HOURS" =~ ^[0-9]+$ && "$THRESHOLD_HOURS" -gt 0 ]] || { echo "ERROR: threshold must be a positive integer (hours)." >&2; exit 1; }
 
